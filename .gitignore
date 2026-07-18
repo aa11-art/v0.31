@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editor and IDE user settings
+.vscode/
+*.uvguix.*
+*.uvoptx
+JLinkSettings.ini
+
+# Keil build output
+project/mdk/Objects/
+project/mdk/Listings/
+*.obj
+*.o
+*.d
+*.axf
+*.dep
+*.lnp
+*.map
+*.htm
+*.log
