@@ -142,6 +142,7 @@ static void mission_enter_fault(sokoban_status_t status)
     s_last_status = status;
     s_timer_running = 0u;
     s_state = MISSION_FAULT;
+    path_executor_abort();
 }
 
 static void mission_begin_inspection(void)
@@ -218,6 +219,13 @@ void mission_controller_update_10ms(void)
 void mission_controller_process(void)
 {
     mission_read_frame();
+    if(path_executor_is_fault())
+    {
+        s_timer_running = 0u;
+        s_state = MISSION_FAULT;
+        path_executor_abort();
+        return;
+    }
     switch(s_state)
     {
         case MISSION_ENTER_START_ZONE:

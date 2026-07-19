@@ -11,6 +11,7 @@ extern volatile int photo_data[12][16];
 
 extern volatile uint32_t camera_frame_sequence;
 
+#if !POSITION_STEP_TEST_MODE && !GYRO_SPEED_TUNE_MODE
 static uint8_t debug_screen_tick = 0u;
 
 static void debug_screen_init(void)
@@ -116,6 +117,7 @@ static void debug_screen_update(void)
     ips200_show_uint(128, 176, blast_count, 1);
     ips200_show_uint(96, 192, label, 2);
 }
+#endif
 
 int main(void)
 {
@@ -126,8 +128,17 @@ int main(void)
     system_delay_ms(1000); 
 
     ips200_init(IPS200_TYPE_SPI); 
+#if POSITION_STEP_TEST_MODE
+    position_step_test_screen_init();
+#elif GYRO_SPEED_TUNE_MODE
+    gyro_speed_tune_screen_init();
+#else
     debug_screen_init();
+#endif
     encoder_init();
+#if POSITION_STEP_TEST_MODE || GYRO_SPEED_TUNE_MODE
+    key_init(10);
+#endif
     mecanum_pid_init();
     imu_init();
 
@@ -148,6 +159,12 @@ int main(void)
     pwm_init(MOTOR3_PWM, 17000, 0); 
     gpio_init(MOTOR4_DIR, GPO, 0, GPO_PUSH_PULL);                           
     pwm_init(MOTOR4_PWM, 17000, 0);
+
+#if POSITION_STEP_TEST_MODE
+    position_step_test_init();
+#elif GYRO_SPEED_TUNE_MODE
+    gyro_speed_tune_init();
+#endif
 
     pit_ms_init(PIT_CH0, 10);
     pit_ms_init(PIT_CH1, 1);
@@ -182,10 +199,18 @@ int main(void)
 //    }
 //    printf("#\n"); // VOFA结束标识符
 
-        // mission_controller_process();
-        // mission_turn_process();
-        // mission_label_process();
-        // debug_screen_update();
+#if POSITION_STEP_TEST_MODE
+        position_step_test_process_keys();
+        position_step_test_screen_update();
+#elif GYRO_SPEED_TUNE_MODE
+        gyro_speed_tune_process_keys();
+        gyro_speed_tune_screen_update();
+#else
+        mission_controller_process();
+        mission_turn_process();
+        mission_label_process();
+        debug_screen_update();
+#endif
 			
 			
 			

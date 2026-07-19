@@ -1,7 +1,599 @@
 #include "test.h"
 #include "isr.h"
 #include "uart.h"
+#include "Mecnum.h"
+#include "path_executor.h"
+#include <math.h>
 #include <string.h>
+
+typedef enum
+{
+    GYRO_SPEED_TUNE_TARGET = 0,
+    GYRO_SPEED_TUNE_YAW_KP,
+    GYRO_SPEED_TUNE_RATE_KP,
+    GYRO_SPEED_TUNE_RATE_KD,
+    GYRO_SPEED_TUNE_RUN
+} gyro_speed_tune_item_t;
+
+#define GYRO_SPEED_TUNE_GAIN_STEP (0.1f)
+#define GYRO_SPEED_TUNE_GAIN_MIN  (0.0f)
+#define GYRO_SPEED_TUNE_GAIN_MAX  (20.0f)
+#define GYRO_SPEED_TUNE_RATE_DEADBAND  (0.5f)
+#define GYRO_SPEED_TUNE_YAW_DEADBAND   (0.5f)
+#define GYRO_SPEED_TUNE_RATE_MAX       (50.0f)
+#define GYRO_SPEED_TUNE_TARGET_COUNT   (5u)
+
+static const float s_gyro_speed_tune_targets[GYRO_SPEED_TUNE_TARGET_COUNT] =
+{
+    0.0f, 90.0f, -90.0f, 180.0f, -180.0f
+};
+static volatile gyro_speed_tune_item_t s_gyro_speed_tune_item = GYRO_SPEED_TUNE_TARGET;
+static volatile uint8 s_gyro_speed_tune_running = 0u;
+static volatile uint8 s_gyro_speed_tune_target_index = 0u;
+static volatile float s_gyro_speed_tune_yaw_kp = 5.0f;
+static volatile float s_gyro_speed_tune_kp = 1.5f;
+static volatile float s_gyro_speed_tune_kd = 0.0f;
+static volatile float s_gyro_speed_tune_yaw_error = 0.0f;
+static volatile float s_gyro_speed_tune_rate_target = 0.0f;
+static volatile float s_gyro_speed_tune_error = 0.0f;
+static volatile float s_gyro_speed_tune_output = 0.0f;
+static volatile float s_gyro_speed_tune_peak = 0.0f;
+static uint8 s_gyro_speed_tune_wait_release = 0u;
+static uint8 s_gyro_speed_tune_screen_tick = 0u;
+
+static uint8 gyro_speed_tune_any_key_pressed(void)
+{
+    return (uint8)((gpio_get_level(C14) == GPIO_LOW) ||
+                   (gpio_get_level(C13) == GPIO_LOW) ||
+                   (gpio_get_level(C12) == GPIO_LOW));
+}
+
+static float gyro_speed_tune_adjust_gain(float value, int8 direction)
+{
+    value += (float)direction * GYRO_SPEED_TUNE_GAIN_STEP;
+    if(value < GYRO_SPEED_TUNE_GAIN_MIN) value = GYRO_SPEED_TUNE_GAIN_MIN;
+    if(value > GYRO_SPEED_TUNE_GAIN_MAX) value = GYRO_SPEED_TUNE_GAIN_MAX;
+    if(value < GYRO_SPEED_TUNE_GAIN_STEP * 0.5f) value = 0.0f;
+    return value;
+}
+
+static float gyro_speed_tune_get_yaw_error(float target, float feedback)
+{
+    float error = target - feedback;
+
+    if((target == 180.0f) &&
+       (fabsf(feedback) <= GYRO_SPEED_TUNE_YAW_DEADBAND))
+    {
+        return 180.0f - fabsf(feedback);
+    }
+    if((target == -180.0f) &&
+       (fabsf(feedback) <= GYRO_SPEED_TUNE_YAW_DEADBAND))
+    {
+        return -180.0f + fabsf(feedback);
+    }
+    if(error > 180.0f) error -= 360.0f;
+    if(error < -180.0f) error += 360.0f;
+    return error;
+}
+
+static void gyro_speed_tune_reset_yaw_pid(void)
+{
+    yaw_pid.kp = s_gyro_speed_tune_yaw_kp;
+    yaw_pid.ki = 0.0f;
+    yaw_pid.kd = 0.0f;
+    yaw_pid.target = 0.0f;
+    yaw_pid.feedback = 0.0f;
+    yaw_pid.error = 0.0f;
+    yaw_pid.prev_error = 0.0f;
+    yaw_pid.last_error = 0.0f;
+    yaw_pid.integral = 0.0f;
+    yaw_pid.output = 0.0f;
+    yaw_pid.max_out = GYRO_SPEED_TUNE_RATE_MAX;
+    yaw_pid.max_i = 0.0f;
+}
+
+static void gyro_speed_tune_reset_pid(void)
+{
+    gyro_w_pid.kp = s_gyro_speed_tune_kp;
+    gyro_w_pid.ki = 0.0f;
+    gyro_w_pid.kd = s_gyro_speed_tune_kd;
+    gyro_w_pid.target = 0.0f;
+    gyro_w_pid.feedback = 0.0f;
+    gyro_w_pid.error = 0.0f;
+    gyro_w_pid.prev_error = 0.0f;
+    gyro_w_pid.last_error = 0.0f;
+    gyro_w_pid.integral = 0.0f;
+    gyro_w_pid.output = 0.0f;
+    gyro_w_pid.max_out = 500.0f;
+    gyro_w_pid.max_i = 0.0f;
+}
+
+static void gyro_speed_tune_zero_wheels(void)
+{
+    v_fL = 0.0f;
+    v_fR = 0.0f;
+    v_bL = 0.0f;
+    v_bR = 0.0f;
+}
+
+static void gyro_speed_tune_stop(void)
+{
+    s_gyro_speed_tune_running = 0u;
+    s_gyro_speed_tune_yaw_error = 0.0f;
+    s_gyro_speed_tune_rate_target = 0.0f;
+    s_gyro_speed_tune_error = 0.0f;
+    s_gyro_speed_tune_output = 0.0f;
+    gyro_speed_tune_zero_wheels();
+    gyro_speed_tune_reset_yaw_pid();
+    gyro_speed_tune_reset_pid();
+    MecanumSpeedPidReset();
+}
+
+void gyro_speed_tune_init(void)
+{
+    s_gyro_speed_tune_item = GYRO_SPEED_TUNE_TARGET;
+    s_gyro_speed_tune_target_index = 0u;
+    s_gyro_speed_tune_yaw_kp = 5.0f;
+    s_gyro_speed_tune_kp = 1.5f;
+    s_gyro_speed_tune_kd = 0.0f;
+    s_gyro_speed_tune_peak = 0.0f;
+    s_gyro_speed_tune_wait_release = 0u;
+    s_gyro_speed_tune_screen_tick = 0u;
+    gyro_speed_tune_stop();
+    MecanumMotorSpeedControl();
+}
+
+void gyro_speed_tune_process_keys(void)
+{
+    key_scanner();
+
+    if(s_gyro_speed_tune_wait_release != 0u)
+    {
+        if(gyro_speed_tune_any_key_pressed() == 0u)
+        {
+            key_clear_all_state();
+            s_gyro_speed_tune_wait_release = 0u;
+        }
+        return;
+    }
+
+    if(s_gyro_speed_tune_running != 0u)
+    {
+        if(gyro_speed_tune_any_key_pressed() != 0u)
+        {
+            __disable_irq();
+            gyro_speed_tune_stop();
+            __enable_irq();
+            key_clear_all_state();
+            s_gyro_speed_tune_wait_release = 1u;
+        }
+        return;
+    }
+
+    if(key_get_state(KEY_2) == KEY_SHORT_PRESS)
+    {
+        s_gyro_speed_tune_item = (gyro_speed_tune_item_t)(
+            ((uint8)s_gyro_speed_tune_item + 1u) % 5u);
+        key_clear_state(KEY_2);
+    }
+    else if((key_get_state(KEY_3) == KEY_SHORT_PRESS) ||
+            (key_get_state(KEY_4) == KEY_SHORT_PRESS))
+    {
+        int8 direction = (key_get_state(KEY_3) == KEY_SHORT_PRESS) ? -1 : 1;
+
+        __disable_irq();
+        if(s_gyro_speed_tune_item == GYRO_SPEED_TUNE_TARGET)
+        {
+            if(direction > 0)
+            {
+                s_gyro_speed_tune_target_index = (uint8)(
+                    (s_gyro_speed_tune_target_index + 1u) %
+                    GYRO_SPEED_TUNE_TARGET_COUNT);
+            }
+            else
+            {
+                s_gyro_speed_tune_target_index = (uint8)(
+                    (s_gyro_speed_tune_target_index +
+                     GYRO_SPEED_TUNE_TARGET_COUNT - 1u) %
+                    GYRO_SPEED_TUNE_TARGET_COUNT);
+            }
+            gyro_speed_tune_reset_yaw_pid();
+            gyro_speed_tune_reset_pid();
+            MecanumSpeedPidReset();
+        }
+        else if(s_gyro_speed_tune_item == GYRO_SPEED_TUNE_YAW_KP)
+        {
+            s_gyro_speed_tune_yaw_kp = gyro_speed_tune_adjust_gain(
+                s_gyro_speed_tune_yaw_kp, direction);
+            gyro_speed_tune_reset_yaw_pid();
+        }
+        else if(s_gyro_speed_tune_item == GYRO_SPEED_TUNE_RATE_KP)
+        {
+            s_gyro_speed_tune_kp = gyro_speed_tune_adjust_gain(
+                s_gyro_speed_tune_kp, direction);
+            gyro_speed_tune_reset_pid();
+        }
+        else if(s_gyro_speed_tune_item == GYRO_SPEED_TUNE_RATE_KD)
+        {
+            s_gyro_speed_tune_kd = gyro_speed_tune_adjust_gain(
+                s_gyro_speed_tune_kd, direction);
+            gyro_speed_tune_reset_pid();
+        }
+        else if((s_gyro_speed_tune_item == GYRO_SPEED_TUNE_RUN) &&
+                (direction > 0))
+        {
+            s_gyro_speed_tune_peak = 0.0f;
+            gyro_speed_tune_reset_yaw_pid();
+            gyro_speed_tune_reset_pid();
+            MecanumSpeedPidReset();
+            s_gyro_speed_tune_running = 1u;
+        }
+        __enable_irq();
+
+        key_clear_all_state();
+    }
+}
+
+void gyro_speed_tune_update_10ms(void)
+{
+    float yaw_target;
+    float yaw_error;
+    float rate_target;
+    float rate_error;
+    float output;
+    float gyro_abs;
+
+    if(s_gyro_speed_tune_running != 0u)
+    {
+        yaw_target = s_gyro_speed_tune_targets[s_gyro_speed_tune_target_index];
+        gyro_abs = fabsf(Gyro.x);
+        if(gyro_abs > s_gyro_speed_tune_peak)
+        {
+            s_gyro_speed_tune_peak = gyro_abs;
+        }
+
+        yaw_error = gyro_speed_tune_get_yaw_error(
+            yaw_target, yaw);
+        if(fabsf(yaw_error) <= GYRO_SPEED_TUNE_YAW_DEADBAND)
+        {
+            gyro_speed_tune_reset_yaw_pid();
+            s_gyro_speed_tune_yaw_error = 0.0f;
+            rate_target = 0.0f;
+        }
+        else
+        {
+            s_gyro_speed_tune_yaw_error = yaw_error;
+            rate_target = YawControl(yaw_target, yaw);
+        }
+        s_gyro_speed_tune_rate_target = rate_target;
+
+        rate_error = rate_target - Gyro.x;
+        if(fabsf(rate_error) <= GYRO_SPEED_TUNE_RATE_DEADBAND)
+        {
+            gyro_speed_tune_reset_pid();
+            s_gyro_speed_tune_error = 0.0f;
+            output = 0.0f;
+        }
+        else
+        {
+            s_gyro_speed_tune_error = rate_error;
+            output = PID_Calc(&gyro_w_pid, rate_target, Gyro.x);
+        }
+        s_gyro_speed_tune_output = output;
+
+        v_fL = -output;
+        v_fR = output;
+        v_bL = -output;
+        v_bR = output;
+    }
+    else
+    {
+        s_gyro_speed_tune_yaw_error = 0.0f;
+        s_gyro_speed_tune_rate_target = 0.0f;
+        s_gyro_speed_tune_error = 0.0f;
+        s_gyro_speed_tune_output = 0.0f;
+        gyro_speed_tune_zero_wheels();
+    }
+
+    MecanumMotorSpeedControl();
+}
+
+void gyro_speed_tune_screen_init(void)
+{
+    ips200_clear();
+    ips200_show_string(0,   0, "YAW CASCADE TUNE");
+    ips200_show_string(0,  16, "STATE/ITEM");
+    ips200_show_string(0,  32, "YAW KP");
+    ips200_show_string(0,  48, "RATE KP");
+    ips200_show_string(0,  64, "RATE KD");
+    ips200_show_string(0,  80, "TARGET YAW");
+    ips200_show_string(0,  96, "YAW");
+    ips200_show_string(0, 112, "YAW ERR");
+    ips200_show_string(0, 128, "TARGET RATE");
+    ips200_show_string(0, 144, "GYRO X");
+    ips200_show_string(0, 160, "RATE ERR");
+    ips200_show_string(0, 176, "VW OUT");
+    ips200_show_string(0, 192, "GYRO PEAK");
+    ips200_show_string(0, 208, "K2:NEXT K3:- K4:+");
+    ips200_show_string(0, 224, "RUN K4:GO ANY:STOP");
+}
+
+void gyro_speed_tune_screen_update(void)
+{
+    gyro_speed_tune_item_t item;
+    uint8 running;
+    float yaw_target;
+    float yaw_kp;
+    float kp;
+    float kd;
+    float yaw_error;
+    float rate_target;
+    float gyro_value;
+    float error_value;
+    float output_value;
+    float yaw_value;
+    float peak_value;
+
+    if(++s_gyro_speed_tune_screen_tick < 10u)
+    {
+        return;
+    }
+    s_gyro_speed_tune_screen_tick = 0u;
+
+    __disable_irq();
+    item = s_gyro_speed_tune_item;
+    running = s_gyro_speed_tune_running;
+    yaw_target = s_gyro_speed_tune_targets[s_gyro_speed_tune_target_index];
+    yaw_kp = s_gyro_speed_tune_yaw_kp;
+    kp = s_gyro_speed_tune_kp;
+    kd = s_gyro_speed_tune_kd;
+    yaw_error = s_gyro_speed_tune_yaw_error;
+    rate_target = s_gyro_speed_tune_rate_target;
+    gyro_value = Gyro.x;
+    error_value = s_gyro_speed_tune_error;
+    output_value = s_gyro_speed_tune_output;
+    yaw_value = yaw;
+    peak_value = s_gyro_speed_tune_peak;
+    __enable_irq();
+
+    ips200_show_string(96, 16, running ? "RUN " : "STOP");
+    switch(item)
+    {
+        case GYRO_SPEED_TUNE_TARGET:  ips200_show_string(152, 16, "TGT "); break;
+        case GYRO_SPEED_TUNE_YAW_KP: ips200_show_string(152, 16, "YKP "); break;
+        case GYRO_SPEED_TUNE_RATE_KP: ips200_show_string(152, 16, "RKP "); break;
+        case GYRO_SPEED_TUNE_RATE_KD: ips200_show_string(152, 16, "RKD "); break;
+        case GYRO_SPEED_TUNE_RUN:     ips200_show_string(152, 16, "RUN "); break;
+        default:                      ips200_show_string(152, 16, "ERR "); break;
+    }
+
+    ips200_show_float(104,  32, yaw_kp,      5, 1);
+    ips200_show_float(104,  48, kp,          5, 1);
+    ips200_show_float(104,  64, kd,          5, 1);
+    ips200_show_float(104,  80, yaw_target,   7, 1);
+    ips200_show_float(104,  96, yaw_value,   7, 1);
+    ips200_show_float(104, 112, yaw_error,   7, 1);
+    ips200_show_float(104, 128, rate_target, 7, 1);
+    ips200_show_float(104, 144, gyro_value,  7, 1);
+    ips200_show_float(104, 160, error_value, 7, 1);
+    ips200_show_float(104, 176, output_value,7, 1);
+    ips200_show_float(104, 192, peak_value,  7, 1);
+}
+
+static const sokoban_body_direction_t s_position_step_directions[4] =
+{
+    SOKOBAN_BODY_FORWARD,
+    SOKOBAN_BODY_BACKWARD,
+    SOKOBAN_BODY_LEFT,
+    SOKOBAN_BODY_RIGHT
+};
+static volatile uint8 s_position_step_direction_index = 0u;
+static volatile float s_position_step_yaw_error = 0.0f;
+static volatile float s_position_step_rate_target = 0.0f;
+static volatile float s_position_step_rate_error = 0.0f;
+static volatile float s_position_step_vw = 0.0f;
+static uint8 s_position_step_wait_release = 0u;
+static uint8 s_position_step_screen_tick = 0u;
+
+static void position_step_test_reset_control(void)
+{
+    s_position_step_yaw_error = 0.0f;
+    s_position_step_rate_target = 0.0f;
+    s_position_step_rate_error = 0.0f;
+    s_position_step_vw = 0.0f;
+    MecanumCarStop();
+}
+
+void position_step_test_init(void)
+{
+    s_position_step_direction_index = 0u;
+    s_position_step_wait_release = 0u;
+    s_position_step_screen_tick = 0u;
+    path_executor_abort();
+    target_yaw = 0.0f;
+    position_step_test_reset_control();
+    MecanumMotorSpeedControl();
+}
+
+void position_step_test_process_keys(void)
+{
+    key_scanner();
+
+    if(s_position_step_wait_release != 0u)
+    {
+        if(gyro_speed_tune_any_key_pressed() == 0u)
+        {
+            key_clear_all_state();
+            s_position_step_wait_release = 0u;
+        }
+        return;
+    }
+
+    if(path_executor_is_idle() == 0u)
+    {
+        if(gyro_speed_tune_any_key_pressed() != 0u)
+        {
+            path_executor_abort();
+            __disable_irq();
+            position_step_test_reset_control();
+            __enable_irq();
+            key_clear_all_state();
+            s_position_step_wait_release = 1u;
+        }
+        return;
+    }
+
+    if(key_get_state(KEY_2) == KEY_SHORT_PRESS)
+    {
+        s_position_step_direction_index =
+            (uint8)((s_position_step_direction_index + 1u) % 4u);
+        key_clear_state(KEY_2);
+    }
+    else if(key_get_state(KEY_3) == KEY_SHORT_PRESS)
+    {
+        s_position_step_direction_index =
+            (uint8)((s_position_step_direction_index + 3u) % 4u);
+        key_clear_state(KEY_3);
+    }
+    else if(key_get_state(KEY_4) == KEY_SHORT_PRESS)
+    {
+        __disable_irq();
+        position_step_test_reset_control();
+        __enable_irq();
+        path_executor_start_body_step(
+            s_position_step_directions[s_position_step_direction_index]);
+        key_clear_state(KEY_4);
+    }
+}
+
+void position_step_test_update_10ms(void)
+{
+    float yaw_error;
+    float rate_error;
+
+    path_executor_update_10ms();
+
+    if(path_executor_is_idle() == 0u)
+    {
+        MecanumCarSpeedControl();
+
+        yaw_error = gyro_speed_tune_get_yaw_error(target_yaw, yaw);
+        if(fabsf(yaw_error) <= GYRO_SPEED_TUNE_YAW_DEADBAND)
+        {
+            s_position_step_yaw_error = 0.0f;
+        }
+        else
+        {
+            s_position_step_yaw_error = yaw_error;
+        }
+        s_position_step_rate_target = target_vw;
+
+        rate_error = target_vw - Gyro.x;
+        if(fabsf(rate_error) <= GYRO_SPEED_TUNE_RATE_DEADBAND)
+        {
+            s_position_step_rate_error = 0.0f;
+        }
+        else
+        {
+            s_position_step_rate_error = rate_error;
+        }
+        s_position_step_vw = target_vtheta;
+    }
+    else
+    {
+        position_step_test_reset_control();
+    }
+
+    MecanumMotorSpeedControl();
+}
+
+void position_step_test_screen_init(void)
+{
+    ips200_clear();
+    ips200_show_string(0,   0, "ONE CELL MOVE TEST");
+    ips200_show_string(0,  16, "DIRECTION");
+    ips200_show_string(0,  32, "STATE");
+    ips200_show_string(0,  48, "TARGET X");
+    ips200_show_string(0,  64, "POSITION X");
+    ips200_show_string(0,  80, "ERROR X");
+    ips200_show_string(0,  96, "TARGET Y");
+    ips200_show_string(0, 112, "POSITION Y");
+    ips200_show_string(0, 128, "ERROR Y");
+    ips200_show_string(0, 144, "VX/VY");
+    ips200_show_string(0, 160, "YAW");
+    ips200_show_string(0, 176, "YAW ERR");
+    ips200_show_string(0, 192, "VW OUT");
+    ips200_show_string(0, 208, "K2:NEXT K3:PREV");
+    ips200_show_string(0, 224, "K4:GO ANY:STOP");
+}
+
+void position_step_test_screen_update(void)
+{
+    uint8 direction_index;
+    uint8 state;
+    float target_x;
+    float target_y;
+    float position_x;
+    float position_y;
+    float command_vx;
+    float command_vy;
+    float yaw_value;
+    float yaw_error;
+    float vw;
+
+    if(++s_position_step_screen_tick < 10u)
+    {
+        return;
+    }
+    s_position_step_screen_tick = 0u;
+
+    __disable_irq();
+    direction_index = s_position_step_direction_index;
+    state = path_executor_get_state();
+    target_x = path_executor_get_target_x();
+    target_y = path_executor_get_target_y();
+    position_x = path_executor_get_position_x();
+    position_y = path_executor_get_position_y();
+    command_vx = target_vx;
+    command_vy = target_vy;
+    yaw_value = yaw;
+    yaw_error = s_position_step_yaw_error;
+    vw = s_position_step_vw;
+    __enable_irq();
+
+    switch(s_position_step_directions[direction_index])
+    {
+        case SOKOBAN_BODY_FORWARD:  ips200_show_string(104, 16, "FORWARD "); break;
+        case SOKOBAN_BODY_BACKWARD: ips200_show_string(104, 16, "BACKWARD"); break;
+        case SOKOBAN_BODY_LEFT:     ips200_show_string(104, 16, "LEFT    "); break;
+        case SOKOBAN_BODY_RIGHT:    ips200_show_string(104, 16, "RIGHT   "); break;
+        default:                    ips200_show_string(104, 16, "INVALID "); break;
+    }
+
+    switch(state)
+    {
+        case 0u: ips200_show_string(104, 32, "IDLE   "); break;
+        case 1u: ips200_show_string(104, 32, "LOAD   "); break;
+        case 2u: ips200_show_string(104, 32, "RUN    "); break;
+        case 3u: ips200_show_string(104, 32, "SETTLE "); break;
+        case 4u: ips200_show_string(104, 32, "DONE   "); break;
+        case 5u: ips200_show_string(104, 32, "FAULT  "); break;
+        default: ips200_show_string(104, 32, "INVALID"); break;
+    }
+
+    ips200_show_float(104,  48, target_x,            7, 1);
+    ips200_show_float(104,  64, position_x,          7, 1);
+    ips200_show_float(104,  80, target_x-position_x, 7, 1);
+    ips200_show_float(104,  96, target_y,            7, 1);
+    ips200_show_float(104, 112, position_y,          7, 1);
+    ips200_show_float(104, 128, target_y-position_y, 7, 1);
+    ips200_show_float(80,  144, command_vx,          5, 1);
+    ips200_show_string(136, 144, "/");
+    ips200_show_float(152, 144, command_vy,          5, 1);
+    ips200_show_float(104, 160, yaw_value,           7, 1);
+    ips200_show_float(104, 176, yaw_error,           7, 1);
+    ips200_show_float(104, 192, vw,                  7, 1);
+}
 
 #define LABEL_TEST_OBJECT_TYPE       (1u)
 #define LABEL_TEST_OBJECT_INDEX      (0u)

@@ -38,6 +38,7 @@
 #include "isr.h"
 #include "path_executor.h"
 #include "mission_controller.h"
+#include "test.h"
 
 
 extern int error;
@@ -63,11 +64,24 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH0))
     {
         encoder_get_speed();
-				x_y_get();
-        PositionControl(0, 0, now_xx, now_yy);
+#if POSITION_STEP_TEST_MODE
+        position_step_test_update_10ms();
+#elif GYRO_SPEED_TUNE_MODE
+        gyro_speed_tune_update_10ms();
+#else
         path_executor_update_10ms();
-        MecanumCarSpeedControl();
+        if(path_executor_is_fault() ||
+           (mission_controller_get_state() == MISSION_FAULT) ||
+           (mission_controller_get_state() == MISSION_FINISHED))
+        {
+            MecanumCarStop();
+        }
+        else
+        {
+            MecanumCarSpeedControl();
+        }
         MecanumMotorSpeedControl();
+#endif
     //    get_encoder_total();
         pit_flag_clear(PIT_CH0);
     }
@@ -80,7 +94,7 @@ void PIT_IRQHandler(void)
     
     if(pit_flag_get(PIT_CH2))
     {
-        // mission_controller_update_10ms();
+        mission_controller_update_10ms();
         pit_flag_clear(PIT_CH2);
     }
     
