@@ -11,6 +11,9 @@ volatile float target_vx = 0.0f;
 volatile float target_vy = 0.0f;
 float target_vw = 0.0f;
 float target_vtheta = 0.0f;
+float now_xx=0.0f;
+float now_yy=0.0f;
+float current_distance=0.0f;
 
 PID speed_pid[4];
 //pid position
@@ -21,22 +24,22 @@ PID gyro_w_pid;
 //mecanum_PID_init
 float now_x=0.0f;
 float now_y=0.0f;
-float current_distance = 0.0f;
+
 
 void mecanum_pid_init(void)
 {
 	//角度环
-    PID_Init(&yaw_pid, 3.5f, 0.0f, 0.0f, 180.0f, 0.0f);
+    PID_Init(&yaw_pid, 4.0f, 0.0f, 0.0f, 180.0f, 0.0f);
 
 
     // PID_Init(&speed_pid[0],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[1],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[2],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[3],4, 0.2, 0, 4000,4000);
-    PID_Init(&speed_pid[0],2.0, 0.2, 0, 4000,4000);
-    PID_Init(&speed_pid[1],2.0, 0.2, 0, 4000,4000);
-    PID_Init(&speed_pid[2],2.0, 0.2, 0, 4000,4000);
-    PID_Init(&speed_pid[3],2.0, 0.2, 0, 4000,4000);
+    PID_Init(&speed_pid[0],8.0, 0.3, 0, 4000,4000);
+    PID_Init(&speed_pid[1],8.0, 0.3, 0, 4000,4000);
+    PID_Init(&speed_pid[2],8.0, 0.3, 0, 4000,4000);
+    PID_Init(&speed_pid[3],8.0, 0.3, 0, 4000,4000);
     // PID_Init(&speed_pid[0],5.5, 0.47, 0, 4000,4000);
     // PID_Init(&speed_pid[1],5.5, 0.47, 0, 4000,4000);
     // PID_Init(&speed_pid[2],5.5, 0.47, 0, 4000,4000);
@@ -47,13 +50,35 @@ void mecanum_pid_init(void)
     // PID_Init(&speed_pid[3],1,0,0,4000,4000);
 
     // 位置环
-    // PID_Init(&pos_pid_x,0.5,0,0,200,0);
-    // PID_Init(&pos_pid_y,0.5,0,0,200,0);
+    PID_Init(&pos_pid_x,10,0,0,80,0);
+    PID_Init(&pos_pid_y,0.5,0,0,50,0);
     // PID_Init(&pos_pid_w,0.5,0,0,200,0);
     // // 角速度环
-    PID_Init(&gyro_w_pid,10,0 ,0,500,0);
+    PID_Init(&gyro_w_pid, 3, 0.0, 0.0, 500.0, 0.0);
 }
+//位置环控制函数
+// target_x/target_y: 期望沿各轴的目标位移（可为相对距离）
+// feedback_x/feedback_y: 当前沿各轴的已行进距离或位置反馈
+void PositionControl(float target_x, float target_y, float feedback_x, float feedback_y)
+{
+    float vx = PID_Calc(&pos_pid_x, target_x, feedback_x);
+    float vy = PID_Calc(&pos_pid_y, target_y, feedback_y);
 
+    target_vx = vx;
+    target_vy = vy;
+
+}
+void x_y_get()
+{
+     now_xx+=( (float)(encoder_fl + encoder_fr + encoder_bl + encoder_br) / 4.0f)*0.01;
+     now_yy+= ((float)(-encoder_fl + encoder_fr + encoder_bl - encoder_br) / 4.0f)*0.01;
+}
+//位置编码器积分清零
+void PositionReset(void)
+{
+    now_xx = 0.0f;
+    now_yy = 0.0f;
+}
 //角度环函数
 float YawControl(float target, float now)
 {
@@ -125,8 +150,10 @@ void MecanumCarSpeedControl()
     float vx = target_vx;
     float vy =  target_vy;
     float target_vw = YawControl(target_yaw, yaw);
+
     
     float vw = PID_Calc(&gyro_w_pid, target_vw, Gyro.x);
+        // float vw = PID_Calc(&gyro_w_pid, 0, Gyro.x);
     // float vw = PID_Calc(&gyro_w_pid, 0, G、yro.x);
     
     // // if(fabs(vw)<50&&vw<0)
@@ -144,7 +171,7 @@ void MecanumCarSpeedControl()
 
     // vw = 0.0;
 //    vx=0.0f;
-//    vy=0.0f;
+  vy=40.0f;
     // vw=0.0f;
     v_fL = vx - vy - vw;
     v_fR = vx + vy + vw;
