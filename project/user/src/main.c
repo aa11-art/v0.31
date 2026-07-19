@@ -120,7 +120,7 @@ static void debug_screen_update(void)
 int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  
-//    debug_init(); 
+   debug_init(); 
     UART_init();
     label_uart_init();
     system_delay_ms(1000); 
@@ -152,15 +152,16 @@ int main(void)
     pit_ms_init(PIT_CH0, 10);
     pit_ms_init(PIT_CH1, 1);
     pit_ms_init(PIT_CH2, 10);		
+    char buffer[100];
 //		ips200_clear();
 //自用屏幕显示
   
     while(1)
     {
         system_delay_ms(10);
-//        sprintf(&buffer[0],"%d,%d,%d,%d,%f,%f,%f,%f,%f\n",encoder_fl,encoder_fr,encoder_bl,encoder_br,
-//                                                       pwm_fl,pwm_fr,pwm_bl,pwm_br,Gyro.z);
-//        wireless_uart_send_string(buffer);
+    //    sprintf(&buffer[0],"%d,%d,%d,%d,%f,%f,%f,%f,%f,%f\n",encoder_fl,encoder_fr,encoder_bl,encoder_br,
+    //                                                   pwm_fl,pwm_fr,pwm_bl,pwm_br,yaw,(encoder_fl + encoder_fr + encoder_bl + encoder_br) / 4.0f);
+    //    wireless_uart_send_string(buffer);
 
 
 
@@ -181,10 +182,10 @@ int main(void)
 //    }
 //    printf("#\n"); // VOFA结束标识符
 
-        mission_controller_process();
-        mission_turn_process();
-        mission_label_process();
-        debug_screen_update();
+        // mission_controller_process();
+        // mission_turn_process();
+        // mission_label_process();
+        // debug_screen_update();
 			
 			
 			

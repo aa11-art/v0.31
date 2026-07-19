@@ -40,7 +40,12 @@ extern volatile float target_yaw;
 extern float current_distance;
 extern float encoder_total;
 
+extern float now_xx;
+extern float now_yy;
+
 void MecanumMotorSpeedControl(void);
+//位置环控制函数：使用位置 PID 输出目标速度
+void PositionControl(float target_x, float target_y, float feedback_x, float feedback_y);
 void motor_set_lf(int32 pwm );
 void motor_set_rf(int32 pwm );
 void motor_set_lb(int32 pwm );
@@ -53,4 +58,5 @@ void move_forward_distance(float distance);
 void move_lateral_distance(float distance);
 void get_encoder_total();
 void MecanumSpeedPidReset(void);
+void x_y_get();
 #endif

@@ -9,7 +9,8 @@
 #define PATH_EXECUTOR_STEP_SPEED     (30.0f)      // 步进速度
 #define PATH_EXECUTOR_COMPLETE_TOL   (1.0f)       // 完成容差
 #define PATH_EXECUTOR_SETTLE_TICKS   (5u)         // 稳定 ticks 数
-#define PATH_EXECUTOR_FIXED_YAW      (0.0f)       // 固定偏航角
+#define PATH_EXECUTOR_FIXED_YAW      (90.0f)       // 固定偏航角
+
 
 
 // 路径执行器状态枚举
@@ -215,12 +216,19 @@ void path_executor_update_10ms(void)
 
         case PATH_EXECUTOR_RUN_STEP:  // 执行步骤
         {
-            target_vx = s_step_target_vx;
-            target_vy = s_step_target_vy;
-
-            axis_velocity = (s_step_axis == PATH_AXIS_VX) ? path_executor_measure_vx() : path_executor_measure_vy();
-            /* encoder_get_speed() returns the pulse delta of this sample, not pulses/second. */
-            s_step_progress += fabsf(axis_velocity)*PATH_EXECUTOR_DT_S;
+            /* 使用位置环 PID 控制：将当前已行进距离作为反馈，目标为单步总距离 */
+            if(s_step_axis == PATH_AXIS_VX)
+            {
+                PositionControl(s_step_distance, 0.0f, s_step_progress, 0.0f);
+                axis_velocity = path_executor_measure_vx();
+                s_step_progress += fabsf(axis_velocity) * PATH_EXECUTOR_DT_S;
+            }
+            else
+            {
+                PositionControl(0.0f, s_step_distance, 0.0f, s_step_progress);
+                axis_velocity = path_executor_measure_vy();
+                s_step_progress += fabsf(axis_velocity) * PATH_EXECUTOR_DT_S;
+            }
 
             if(s_step_progress + PATH_EXECUTOR_COMPLETE_TOL >= s_step_distance)
             {

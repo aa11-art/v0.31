@@ -63,6 +63,8 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH0))
     {
         encoder_get_speed();
+				x_y_get();
+        PositionControl(0, 0, now_xx, now_yy);
         path_executor_update_10ms();
         MecanumCarSpeedControl();
         MecanumMotorSpeedControl();
@@ -78,7 +80,7 @@ void PIT_IRQHandler(void)
     
     if(pit_flag_get(PIT_CH2))
     {
-        mission_controller_update_10ms();
+        // mission_controller_update_10ms();
         pit_flag_clear(PIT_CH2);
     }
     
