@@ -10,6 +10,10 @@ uint8_t path_executor_start_with_distance(const sokoban_solution_t *solution, fl
 uint8_t path_executor_start_body_step(sokoban_body_direction_t direction);
 uint8_t path_executor_start_body_step_with_distance(sokoban_body_direction_t direction,
                                                     float step_distance);
+uint8_t path_executor_start_body_step_with_distance_and_tolerance(
+    sokoban_body_direction_t direction,
+    float step_distance,
+    float complete_tolerance);
 void path_executor_update_10ms(void);
 uint8_t path_executor_is_idle(void);
 uint8_t path_executor_is_done(void);

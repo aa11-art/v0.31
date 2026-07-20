@@ -384,14 +384,18 @@ typedef enum
 {
     POSITION_STEP_TUNE_DIRECTION = 0,
     POSITION_STEP_TUNE_DISTANCE,
+    POSITION_STEP_TUNE_DEADZONE_MIN_RATIO,
     POSITION_STEP_TUNE_RUN
 } position_step_tune_item_t;
 
-#define POSITION_STEP_TUNE_ITEM_COUNT       (3u)
-#define POSITION_STEP_TUNE_DISTANCE_DEFAULT (23.0f)
+#define POSITION_STEP_TUNE_ITEM_COUNT       (4u)
+#define POSITION_STEP_TUNE_DISTANCE_DEFAULT (24.0f)
 #define POSITION_STEP_TUNE_DISTANCE_STEP    (0.5f)
-#define POSITION_STEP_TUNE_DISTANCE_MIN     (10.0f)
-#define POSITION_STEP_TUNE_DISTANCE_MAX     (40.0f)
+#define POSITION_STEP_TUNE_DISTANCE_MIN     (0.5f)
+#define POSITION_STEP_TUNE_DISTANCE_MAX     (5.0f)
+#define POSITION_STEP_TUNE_DEADZONE_RATIO_STEP (0.05f)
+#define POSITION_STEP_TUNE_DEADZONE_RATIO_MIN  (0.0f)
+#define POSITION_STEP_TUNE_DEADZONE_RATIO_MAX  (1.0f)
 
 static const sokoban_body_direction_t s_position_step_directions[4] =
 {
@@ -494,6 +498,15 @@ void position_step_test_process_keys(void)
                 POSITION_STEP_TUNE_DISTANCE_MAX,
                 direction);
         }
+        else if(s_position_step_item == POSITION_STEP_TUNE_DEADZONE_MIN_RATIO)
+        {
+            MecanumSetSpeedDeadzoneMinRatio(position_step_test_adjust(
+                MecanumGetSpeedDeadzoneMinRatio(),
+                POSITION_STEP_TUNE_DEADZONE_RATIO_STEP,
+                POSITION_STEP_TUNE_DEADZONE_RATIO_MIN,
+                POSITION_STEP_TUNE_DEADZONE_RATIO_MAX,
+                direction));
+        }
         else if((s_position_step_item == POSITION_STEP_TUNE_RUN) &&
                 (direction > 0))
         {
@@ -543,7 +556,7 @@ void position_step_test_screen_init(void)
     ips200_show_string(0, 144, "TARGET X/Y");
     ips200_show_string(0, 160, "CMD VX/VY");
     ips200_show_string(0, 176, "YAW");
-    ips200_show_string(0, 192, "UNIT ENC*0.01");
+    ips200_show_string(0, 192, "LAT FF MIN");
     ips200_show_string(0, 208, "K2:ITEM K3:-");
     ips200_show_string(0, 224, "K4:+/RUN ANY:STOP");
 }
@@ -562,6 +575,7 @@ void position_step_test_screen_update(void)
     float command_vx;
     float command_vy;
     float yaw_value;
+    float deadzone_min_ratio;
 
     if(++s_position_step_screen_tick < 10u)
     {
@@ -582,12 +596,15 @@ void position_step_test_screen_update(void)
     command_vx = target_vx;
     command_vy = target_vy;
     yaw_value = yaw;
+    deadzone_min_ratio = MecanumGetSpeedDeadzoneMinRatio();
     __enable_irq();
 
     switch(item)
     {
         case POSITION_STEP_TUNE_DIRECTION: ips200_show_string(104, 16, "DIR "); break;
         case POSITION_STEP_TUNE_DISTANCE:  ips200_show_string(104, 16, "DIST"); break;
+        case POSITION_STEP_TUNE_DEADZONE_MIN_RATIO:
+            ips200_show_string(104, 16, "FFMN"); break;
         case POSITION_STEP_TUNE_RUN:       ips200_show_string(104, 16, "RUN "); break;
         default:                           ips200_show_string(104, 16, "ERR "); break;
     }
@@ -624,6 +641,7 @@ void position_step_test_screen_update(void)
     ips200_show_string(120, 160, "/");
     ips200_show_float(136, 160, command_vy,                       6, 1);
     ips200_show_float(104, 176, yaw_value,                        7, 1);
+    ips200_show_float(104, 192, deadzone_min_ratio,               7, 2);
 }
 
 #define LABEL_TEST_OBJECT_TYPE       (1u)

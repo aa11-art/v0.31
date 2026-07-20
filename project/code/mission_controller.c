@@ -9,6 +9,9 @@
 #define TURN_YAW_SIGN                 (-1)          // 转向方向，改变符号会改变转向
 #define LABEL_REPLY_TIMEOUT_10MS  (50u)             //过多少时间重新发送
 #define LABEL_MAX_ATTEMPTS        (4u)              //最多重发标签次数
+#define LABEL_MAX_VALUE           (10u)
+#define DIGIT_RETRY_BACKOFF_DISTANCE  (3.0f)
+#define DIGIT_RETRY_BACKOFF_TOLERANCE (0.2f)
 
 static volatile mission_state_t s_state = MISSION_ENTER_START_ZONE;
 static volatile uint8_t s_timer_running = 0u;
@@ -383,7 +386,7 @@ void mission_controller_process(void)
                 mission_solution_reset(&s_segment_solution);
                 s_segment_solution.solved = 1u;
                 s_segment_solution.move_count = 1u;
-                s_segment_solution.move_seq[0] = 'D';
+                s_segment_solution.move_seq[0] = 'L';
                 s_segment_solution.move_seq[1] = '\0';
                 if(path_executor_start_with_distance(&s_segment_solution, s_entry_distance)) s_segment_running = 1u;
             }
@@ -608,6 +611,8 @@ void mission_label_process(void)
 {
     static uint8_t request_sent = 0u;
     static uint8_t attempt_count = 0u;
+    static uint8_t digit_backoff_used = 0u;
+    static uint8_t digit_backoff_running = 0u;
     static uint32_t last_send_10ms = 0u;
 
     const sokoban_inspection_event_t *event;
@@ -626,6 +631,8 @@ void mission_label_process(void)
     {
         request_sent = 0u;
         attempt_count = 0u;
+        digit_backoff_used = 0u;
+        digit_backoff_running = 0u;
         last_send_10ms = 0u;
         return;
     }
@@ -637,6 +644,28 @@ void mission_label_process(void)
     event = mission_controller_get_pending_inspection();
     if(event == 0)
     {
+        return;
+    }
+
+    if(digit_backoff_running != 0u)
+    {
+        if(path_executor_is_fault())
+        {
+            mission_enter_fault(SOKOBAN_STATUS_INVALID_LABELS);
+            return;
+        }
+        if(!path_executor_is_done()) return;
+
+        MecanumCarStop();
+        MecanumSpeedPidReset();
+        __disable_irq();
+        label_rx_ready = 0u;
+        __enable_irq();
+
+        digit_backoff_running = 0u;
+        request_sent = 0u;
+        attempt_count = 0u;
+        last_send_10ms = mission_controller_get_elapsed_10ms();
         return;
     }
 
@@ -673,7 +702,8 @@ void mission_label_process(void)
          */
         if((type == event->object_type) &&
            (index == event->object_index) &&
-           (label != 0u))
+           (label != 0u) &&
+           (label <= LABEL_MAX_VALUE))
         {
             if(mission_controller_set_label(
                    (sokoban_object_type_t)type,
@@ -682,6 +712,37 @@ void mission_label_process(void)
             {
                 return;
             }
+        }
+
+        if((type == event->object_type) &&
+           (index == event->object_index) &&
+           (type == (uint8_t)SOKOBAN_OBJECT_GOAL) &&
+           (label == 0u))
+        {
+            if(digit_backoff_used != 0u)
+            {
+                mission_enter_fault(SOKOBAN_STATUS_INVALID_LABELS);
+                return;
+            }
+
+            MecanumCarStop();
+            if(!path_executor_start_body_step_with_distance_and_tolerance(
+                   SOKOBAN_BODY_BACKWARD,
+                   DIGIT_RETRY_BACKOFF_DISTANCE,
+                   DIGIT_RETRY_BACKOFF_TOLERANCE))
+            {
+                mission_enter_fault(SOKOBAN_STATUS_INVALID_LABELS);
+                return;
+            }
+
+            digit_backoff_used = 1u;
+            digit_backoff_running = 1u;
+            request_sent = 0u;
+            attempt_count = 0u;
+            __disable_irq();
+            label_rx_ready = 0u;
+            __enable_irq();
+            return;
         }
     }
 
