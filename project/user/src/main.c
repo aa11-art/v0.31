@@ -31,6 +31,8 @@ static void debug_screen_init(void)
     ips200_show_string(0, 160, "CAM_SEQ");
     ips200_show_string(0, 176, "BLAST");
     ips200_show_string(0, 192, "LABEL");
+    ips200_show_string(0, 208, "LEVEL/RESULT");
+    ips200_show_string(0, 224, "MAP/HOLD/FATAL");
 }
 
 static void debug_screen_update(void)
@@ -47,7 +49,8 @@ static void debug_screen_update(void)
     float debug_target_vy;
     float encoder_vx;
     float encoder_vy;
-    float progress;
+    uint16_t path_index;
+    uint16_t path_count;
 
     uint32_t camera_sequence;
     uint8_t blast_index;
@@ -81,7 +84,8 @@ static void debug_screen_update(void)
     debug_target_vy = target_vy;
 
     camera_sequence = camera_frame_sequence;
-    progress = path_executor_get_last_step_distance();
+    path_index = path_executor_get_step_index();
+    path_count = path_executor_get_move_count();
 
     __enable_irq();
 
@@ -108,7 +112,9 @@ static void debug_screen_update(void)
     ips200_show_float(96,  96, debug_target_vy,  6, 1);
     ips200_show_float(96, 112, encoder_vx,       6, 1);
     ips200_show_float(96, 128, encoder_vy,       6, 1);
-    ips200_show_float(96, 144, progress,         6, 1);
+    ips200_show_uint(96, 144, path_index, 4);
+    ips200_show_string(160, 144, "/");
+    ips200_show_uint(176, 144, path_count, 4);
 
     ips200_show_uint(96, 160, camera_sequence, 10);
 
@@ -116,6 +122,15 @@ static void debug_screen_update(void)
     ips200_show_string(112, 176, "/");
     ips200_show_uint(128, 176, blast_count, 1);
     ips200_show_uint(96, 192, label, 2);
+    ips200_show_uint(112, 208, mission_controller_get_level(), 1);
+    ips200_show_string(128, 208, "/");
+    ips200_show_uint(144, 208, mission_controller_get_level_result(), 1);
+    ips200_show_uint(112, 224, mission_controller_get_map_stable_frames(), 1);
+    ips200_show_string(128, 224, "/");
+    ips200_show_uint(144, 224,
+        mission_controller_get_abort_hold_remaining_10ms(), 3);
+    ips200_show_string(192, 224, "/");
+    ips200_show_uint(208, 224, mission_controller_get_fatal_fault(), 1);
 }
 #endif
 
@@ -136,9 +151,7 @@ int main(void)
     debug_screen_init();
 #endif
     encoder_init();
-#if POSITION_STEP_TEST_MODE || GYRO_SPEED_TUNE_MODE
     key_init(10);
-#endif
     mecanum_pid_init();
     imu_init();
 
@@ -146,7 +159,6 @@ int main(void)
 
     camera_sokoban_init();
     path_executor_init();
-    mission_controller_init();
 	
 //电机初始化
                                 
@@ -159,6 +171,7 @@ int main(void)
     pwm_init(MOTOR3_PWM, 17000, 0); 
     gpio_init(MOTOR4_DIR, GPO, 0, GPO_PUSH_PULL);                           
     pwm_init(MOTOR4_PWM, 17000, 0);
+    mission_controller_init();
 
 #if POSITION_STEP_TEST_MODE
     position_step_test_init();
@@ -206,6 +219,10 @@ int main(void)
         gyro_speed_tune_process_keys();
         gyro_speed_tune_screen_update();
 #else
+        if(gpio_get_level(C14) == GPIO_LOW)
+        {
+            mission_controller_emergency_stop();
+        }
         mission_controller_process();
         mission_turn_process();
         mission_label_process();

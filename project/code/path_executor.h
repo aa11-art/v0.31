@@ -20,6 +20,8 @@ uint8_t path_executor_is_done(void);
 uint8_t path_executor_is_fault(void);
 uint8_t path_executor_is_running(void);
 uint8_t path_executor_get_state(void);
+uint16_t path_executor_get_step_index(void);
+uint16_t path_executor_get_move_count(void);
 void path_executor_set_heading(sokoban_direction_t heading);
 float path_executor_get_last_step_distance(void);
 float path_executor_get_position_x(void);

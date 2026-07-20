@@ -430,6 +430,16 @@ uint8_t path_executor_get_state(void)
     return (uint8_t)s_state;
 }
 
+uint16_t path_executor_get_step_index(void)
+{
+    return s_step_index;
+}
+
+uint16_t path_executor_get_move_count(void)
+{
+    return s_move_count;
+}
+
 float path_executor_get_position_x(void)
 {
     return s_step_position_x;

@@ -70,17 +70,15 @@ void PIT_IRQHandler(void)
         gyro_speed_tune_update_10ms();
 #else
         path_executor_update_10ms();
-        if(path_executor_is_fault() ||
-           (mission_controller_get_state() == MISSION_FAULT) ||
-           (mission_controller_get_state() == MISSION_FINISHED))
+        if(path_executor_is_fault() || mission_controller_should_stop())
         {
             MecanumCarStop();
         }
         else
         {
             MecanumCarSpeedControl();
+            MecanumMotorSpeedControl();
         }
-        MecanumMotorSpeedControl();
 #endif
     //    get_encoder_total();
         pit_flag_clear(PIT_CH0);

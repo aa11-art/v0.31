@@ -267,6 +267,14 @@ void MecanumCarStop(void)
     gyro_w_pid.integral = 0.0f;
     gyro_w_pid.last_error = 0.0f;
     MecanumSpeedPidReset();
+    pwm_fl = 0.0f;
+    pwm_fr = 0.0f;
+    pwm_bl = 0.0f;
+    pwm_br = 0.0f;
+    motor_set_lf(0);
+    motor_set_rf(0);
+    motor_set_lb(0);
+    motor_set_rb(0);
 }
 
 // 使用编码器积分实现前进一定距离的函数
