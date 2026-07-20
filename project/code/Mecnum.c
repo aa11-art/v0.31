@@ -31,7 +31,7 @@ float now_y=0.0f;
 void mecanum_pid_init(void)
 {
 	//角度环
-    PID_Init(&yaw_pid, 5.0f, 0.0f, 0.0f, 50.0f, 0.0f);
+    PID_Init(&yaw_pid, 5.0f, 0.0f, 0.0f, 400.0f, 0.0f);
 
 
     // PID_Init(&speed_pid[0],4, 0.2, 0, 4000,4000);
@@ -52,8 +52,8 @@ void mecanum_pid_init(void)
     // PID_Init(&speed_pid[3],1,0,0,4000,4000);
 
     // 位置环
-    PID_Init(&pos_pid_x,10,0,0,80,0);
-    PID_Init(&pos_pid_y,10,0,0,80,0);
+    PID_Init(&pos_pid_x,7,0,0,55,0);
+    PID_Init(&pos_pid_y,8.5,0,0,80,0);
     // PID_Init(&pos_pid_w,0.5,0,0,200,0);
     // // 角速度环
     PID_Init(&gyro_w_pid, 1.5f, 0.0f, 0.0f, 500.0f, 0.0f);

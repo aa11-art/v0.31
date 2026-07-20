@@ -5,9 +5,9 @@
 
 // 路径执行器相关宏定义
 #define PATH_EXECUTOR_DT_S            (0.01f)     //时间步长（秒）
-#define PATH_EXECUTOR_CELL_DISTANCE  (23.0f)      // 每个单元格的距离
-#define PATH_EXECUTOR_COMPLETE_TOL   (1.0f)       // 完成容差
-#define PATH_EXECUTOR_COMPLETE_TICKS (5u)         // 连续到位 ticks 数
+#define PATH_EXECUTOR_CELL_DISTANCE  (24.0f)      // 每个单元格的距离
+#define PATH_EXECUTOR_COMPLETE_TOL   (1.2f)       // 完成容差
+#define PATH_EXECUTOR_COMPLETE_TICKS (8.0f)         // 连续到位 ticks 数
 #define PATH_EXECUTOR_SETTLE_TICKS   (5u)         // 稳定 ticks 数
 #define PATH_EXECUTOR_TIMEOUT_TICKS  (500u)       // 单步超时（5 秒）
 
@@ -156,7 +156,15 @@ void path_executor_abort(void)
 
 uint8_t path_executor_start_body_step(sokoban_body_direction_t direction)
 {
-    if((uint8_t)direction > (uint8_t)SOKOBAN_BODY_LEFT)
+    return path_executor_start_body_step_with_distance(
+        direction, PATH_EXECUTOR_CELL_DISTANCE);
+}
+
+uint8_t path_executor_start_body_step_with_distance(
+    sokoban_body_direction_t direction, float step_distance)
+{
+    if(((uint8_t)direction > (uint8_t)SOKOBAN_BODY_LEFT) ||
+       (step_distance <= 0.0f))
     {
         return 0u;
     }
@@ -172,7 +180,7 @@ uint8_t path_executor_start_body_step(sokoban_body_direction_t direction)
 
     s_move_count = 1u;
     s_step_index = 0u;
-    s_step_distance = PATH_EXECUTOR_CELL_DISTANCE;
+    s_step_distance = step_distance;
     if(path_executor_prepare_body_step(direction) == 0u)
     {
         s_state = PATH_EXECUTOR_FAULT;
