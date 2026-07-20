@@ -41,6 +41,7 @@ static float s_step_position_y = 0.0f;                               // 单步Y�
 static float s_step_target_x = 0.0f;                                 // 单步X目标
 static float s_step_target_y = 0.0f;                                 // 单步Y目标
 static float s_step_distance = PATH_EXECUTOR_CELL_DISTANCE;          // 步骤距离
+static float s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL; // 运动轴完成容差
 static volatile uint16_t s_step_elapsed_ticks = 0u;                  // 单步运行 ticks 数
 static volatile uint8_t s_complete_ticks = 0u;                       // 连续到位 ticks 数
 static volatile uint8_t s_settle_ticks = 0u;                         // 稳定ticks计数
@@ -126,6 +127,7 @@ void path_executor_init(void)
     s_step_target_x = 0.0f;
     s_step_target_y = 0.0f;
     s_step_distance = PATH_EXECUTOR_CELL_DISTANCE;
+    s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
     s_step_elapsed_ticks = 0u;
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
@@ -146,6 +148,7 @@ void path_executor_abort(void)
     s_step_position_y = 0.0f;
     s_step_target_x = 0.0f;
     s_step_target_y = 0.0f;
+    s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
     s_step_elapsed_ticks = 0u;
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
@@ -163,8 +166,18 @@ uint8_t path_executor_start_body_step(sokoban_body_direction_t direction)
 uint8_t path_executor_start_body_step_with_distance(
     sokoban_body_direction_t direction, float step_distance)
 {
+    return path_executor_start_body_step_with_distance_and_tolerance(
+        direction, step_distance, PATH_EXECUTOR_COMPLETE_TOL);
+}
+
+uint8_t path_executor_start_body_step_with_distance_and_tolerance(
+    sokoban_body_direction_t direction,
+    float step_distance,
+    float complete_tolerance)
+{
     if(((uint8_t)direction > (uint8_t)SOKOBAN_BODY_LEFT) ||
-       (step_distance <= 0.0f))
+       (step_distance <= 0.0f) ||
+       (complete_tolerance <= 0.0f))
     {
         return 0u;
     }
@@ -181,6 +194,7 @@ uint8_t path_executor_start_body_step_with_distance(
     s_move_count = 1u;
     s_step_index = 0u;
     s_step_distance = step_distance;
+    s_step_complete_tolerance = complete_tolerance;
     if(path_executor_prepare_body_step(direction) == 0u)
     {
         s_state = PATH_EXECUTOR_FAULT;
@@ -226,6 +240,7 @@ static uint8_t path_executor_start_internal(const sokoban_solution_t *solution,
     s_step_target_x = 0.0f;
     s_step_target_y = 0.0f;
     s_step_distance = step_distance;
+    s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
     s_step_elapsed_ticks = 0u;
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
@@ -252,6 +267,9 @@ void path_executor_update_10ms(void)
 {
     float error_x;
     float error_y;
+    uint8_t within_tolerance_x;
+    uint8_t within_tolerance_y;
+    uint8_t within_tolerance;
 
     switch(s_state)
     {
@@ -289,21 +307,39 @@ void path_executor_update_10ms(void)
             s_step_position_y += path_executor_measure_vy() * PATH_EXECUTOR_DT_S;
             s_step_elapsed_ticks++;
 
-            PositionControl(s_step_target_x,
-                            s_step_target_y,
-                            s_step_position_x,
-                            s_step_position_y);
-
             error_x = s_step_target_x - s_step_position_x;
             error_y = s_step_target_y - s_step_position_y;
-            if((fabsf(error_x) <= PATH_EXECUTOR_COMPLETE_TOL) &&
-               (fabsf(error_y) <= PATH_EXECUTOR_COMPLETE_TOL))
+            if(s_step_axis == PATH_AXIS_VX)
             {
+                within_tolerance_x =
+                    (uint8_t)(fabsf(error_x) <= s_step_complete_tolerance);
+                within_tolerance_y =
+                    (uint8_t)(fabsf(error_y) <= PATH_EXECUTOR_COMPLETE_TOL);
+            }
+            else
+            {
+                within_tolerance_x =
+                    (uint8_t)(fabsf(error_x) <= PATH_EXECUTOR_COMPLETE_TOL);
+                within_tolerance_y =
+                    (uint8_t)(fabsf(error_y) <= s_step_complete_tolerance);
+            }
+            within_tolerance =
+                (uint8_t)(within_tolerance_x && within_tolerance_y);
+
+            if(within_tolerance)
+            {
+                path_executor_stop_motion();
                 s_complete_ticks++;
             }
             else
             {
                 s_complete_ticks = 0u;
+                PositionControl(s_step_target_x,
+                                s_step_target_y,
+                                s_step_position_x,
+                                s_step_position_y);
+                if(within_tolerance_x) target_vx = 0.0f;
+                if(within_tolerance_y) target_vy = 0.0f;
             }
 
             if(s_complete_ticks >= PATH_EXECUTOR_COMPLETE_TICKS)

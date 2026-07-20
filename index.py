@@ -517,14 +517,22 @@ def send_result(object_type, object_index, label):
 	except Exception as error:
 		print_error("TX_FAIL", error)
 		return False
+def discard_pending_uart_input():
+	try:
+		pending = uart.any()
+		if pending > 0:
+			uart.read(pending)
+			print("RX_DUPLICATES_DROPPED", pending)
+	except Exception as error:
+		print_error("RX_DRAIN_FAIL", error)
 def match_digit_and_reply(object_type, object_index):
 	match_start_ms = time.ticks_ms()
 	print("DIGIT_REQUEST_RECEIVED", "INDEX", object_index)
 	try:
 		if not release_active_model():
-			return send_result(object_type, object_index, 0)
+			return False
 		if not ensure_digit_templates():
-			return send_result(object_type, object_index, 0)
+			return False
 		best_digit = -1
 		best_score = -2.0
 		second_score = -2.0
@@ -586,10 +594,13 @@ def match_digit_and_reply(object_type, object_index):
 			  "LABEL", label,
 			  "ELAPSED_MS",
 			  time.ticks_diff(time.ticks_ms(), match_start_ms))
-		return send_result(object_type, object_index, label)
+		discard_pending_uart_input()
+		sent = send_result(object_type, object_index, label)
+		discard_pending_uart_input()
+		return sent
 	except Exception as error:
 		print_error("TEMPLATE_MATCH_FAIL", error)
-		return send_result(object_type, object_index, 0)
+		return False
 def classify_and_reply(object_type, object_index):
 	if object_type == 1:
 		return match_digit_and_reply(object_type, object_index)

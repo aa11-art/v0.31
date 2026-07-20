@@ -104,6 +104,20 @@ float pwm_br;
 static const float s_speed_deadzone_positive[4] = {625.0f, 900.0f, 600.0f, 675.0f};
 static const float s_speed_deadzone_negative[4] = {600.0f, 975.0f, 875.0f, 850.0f};
 static int8 s_speed_target_direction[4] = {0, 0, 0, 0};
+static volatile float s_speed_deadzone_min_ratio =
+    WHEEL_SPEED_LATERAL_DEADZONE_MIN_RATIO_DEFAULT;
+
+void MecanumSetSpeedDeadzoneMinRatio(float ratio)
+{
+    if(ratio < 0.0f) ratio = 0.0f;
+    if(ratio > 1.0f) ratio = 1.0f;
+    s_speed_deadzone_min_ratio = ratio;
+}
+
+float MecanumGetSpeedDeadzoneMinRatio(void)
+{
+    return s_speed_deadzone_min_ratio;
+}
 
 static void MecanumSpeedPidResetOne(uint8 index)
 {
@@ -117,7 +131,8 @@ static void MecanumSpeedPidResetOne(uint8 index)
     s_speed_target_direction[index] = 0;
 }
 
-static float MecanumWheelSpeedControl(uint8 index, float target, float feedback)
+static float MecanumWheelSpeedControl(uint8 index, float target, float feedback,
+                                      float deadzone_min_ratio)
 {
     int8 direction;
     float feedforward_ratio;
@@ -139,6 +154,10 @@ static float MecanumWheelSpeedControl(uint8 index, float target, float feedback)
 
     output = PID_Incremental(&speed_pid[index], target, feedback);
     feedforward_ratio = fabsf(target) / WHEEL_SPEED_DEADZONE_FULL_TARGET;
+    if(feedforward_ratio < deadzone_min_ratio)
+    {
+        feedforward_ratio = deadzone_min_ratio;
+    }
     if(feedforward_ratio > 1.0f)
     {
         feedforward_ratio = 1.0f;
@@ -161,16 +180,24 @@ static float MecanumWheelSpeedControl(uint8 index, float target, float feedback)
 // 作用 ： 根据目标 前后速度 左右速度 角速度 控制四个轮子达到目标速度
 void MecanumMotorSpeedControl(void)
 {
+    float deadzone_min_ratio = 0.0f;
+
+    if((fabsf(target_vy) > WHEEL_SPEED_TARGET_EPSILON) &&
+       (fabsf(target_vy) > fabsf(target_vx)))
+    {
+        deadzone_min_ratio = s_speed_deadzone_min_ratio;
+    }
+
     // 将速度转换为PWM（需根据电机额定转速做比例映射，此处简化为直接取整+限幅）
 //	encoder_update();
     // v_fL = 80.0;
     // v_fR = 80.0;
     // v_bL = 80.0;
     // v_bR = 80.0;
-    pwm_fl = MecanumWheelSpeedControl(0u, v_fL, encoder_fl);
-    pwm_fr = MecanumWheelSpeedControl(1u, v_fR, encoder_fr);
-    pwm_bl = MecanumWheelSpeedControl(2u, v_bL, encoder_bl);
-    pwm_br = MecanumWheelSpeedControl(3u, v_bR, encoder_br);
+    pwm_fl = MecanumWheelSpeedControl(0u, v_fL, encoder_fl, deadzone_min_ratio);
+    pwm_fr = MecanumWheelSpeedControl(1u, v_fR, encoder_fr, deadzone_min_ratio);
+    pwm_bl = MecanumWheelSpeedControl(2u, v_bL, encoder_bl, deadzone_min_ratio);
+    pwm_br = MecanumWheelSpeedControl(3u, v_bR, encoder_br, deadzone_min_ratio);
     // 调用电机控制函数执行PWM输出
     motor_set_lf((int32)pwm_fl);
     motor_set_rf((int32)pwm_fr);

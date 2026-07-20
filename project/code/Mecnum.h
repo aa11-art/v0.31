@@ -3,6 +3,7 @@
 
 #include "zf_common_headfile.h"
 #include "PID.h"
+#define WHEEL_SPEED_LATERAL_DEADZONE_MIN_RATIO_DEFAULT (0.7f)
 //电机                    
 #define MOTOR1_DIR               (D3 )   // 左前轮，1 正转
 #define MOTOR1_PWM               (PWM2_MODULE3_CHA_D2)
@@ -59,4 +60,6 @@ void move_forward_distance(float distance);
 void move_lateral_distance(float distance);
 void get_encoder_total();
 void MecanumSpeedPidReset(void);
+void MecanumSetSpeedDeadzoneMinRatio(float ratio);
+float MecanumGetSpeedDeadzoneMinRatio(void);
 #endif
