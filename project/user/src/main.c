@@ -29,7 +29,7 @@ static void debug_screen_init(void)
     ips200_show_string(0, 128, "ENC_VY");
     ips200_show_string(0, 144, "PROGRESS");
     ips200_show_string(0, 160, "CAM_SEQ");
-    ips200_show_string(0, 176, "BLAST");
+    ips200_show_string(0, 176, "PUSH/REC");
     ips200_show_string(0, 192, "LABEL");
     ips200_show_string(0, 208, "LEVEL/RESULT");
     ips200_show_string(0, 224, "MAP/HOLD/FATAL");
@@ -53,9 +53,6 @@ static void debug_screen_update(void)
     uint16_t path_count;
 
     uint32_t camera_sequence;
-    uint8_t blast_index;
-    uint8_t blast_count;
-
     /*
      * 主循环约10ms执行一次，每10次刷新一次屏幕，
      * 即大约100ms刷新一次。
@@ -92,9 +89,6 @@ static void debug_screen_update(void)
     encoder_vx = (float)(fl + fr + bl + br) / 4.0f;
     encoder_vy = (float)(-fl + fr + bl - br) / 4.0f;
 
-    blast_index = mission_controller_get_blast_event_index();
-    blast_count = mission_controller_get_blast_count();
-
     ips200_show_uint(
         96, 0,
         (uint32_t)mission_controller_get_state(),
@@ -118,9 +112,15 @@ static void debug_screen_update(void)
 
     ips200_show_uint(96, 160, camera_sequence, 10);
 
-    ips200_show_uint(96, 176, blast_index, 1);
+    ips200_show_uint(96, 176,
+        mission_controller_get_push_checkpoint_index(), 2);
     ips200_show_string(112, 176, "/");
-    ips200_show_uint(128, 176, blast_count, 1);
+    ips200_show_uint(128, 176,
+        mission_controller_get_push_checkpoint_total(), 2);
+    ips200_show_uint(160, 176, mission_controller_get_recovery_count(), 1);
+    ips200_show_string(176, 176, "/");
+    ips200_show_uint(192, 176,
+        (uint32_t)mission_controller_get_recovery_status(), 1);
     ips200_show_uint(96, 192, label, 2);
     ips200_show_uint(112, 208, mission_controller_get_level(), 1);
     ips200_show_string(128, 208, "/");

@@ -20,14 +20,49 @@ extern volatile uint32_t camera_frame_sequence;
 #define MISSION_TURN_TIMEOUT_10MS            (500u)
 #define MISSION_ABORT_HOLD_10MS              (300u)
 #define MISSION_MAP_STABLE_FRAMES            (3u)
-#define MISSION_BLAST_STABLE_FRAMES          (2u)
+#define MISSION_MAX_RECOVERIES                (3u)
 #define MISSION_STILL_ENCODER_LIMIT          (2)
+#define MISSION_PUSH_SETTLE_STILL_10MS        (20u)
+#define MISSION_PUSH_SETTLE_TIMEOUT_10MS      (100u)
+
+typedef struct
+{
+    uint8_t row;
+    uint8_t col;
+    uint8_t label;
+    uint8_t active;
+    uint8_t bomb;
+} mission_tracked_box_t;
+
+typedef struct
+{
+    uint8_t row;
+    uint8_t col;
+    uint8_t label;
+    uint8_t active;
+} mission_tracked_goal_t;
+
+typedef struct
+{
+    uint8_t valid;
+    uint8_t box_index;
+    uint8_t goal_index;
+    uint8_t is_bomb;
+    uint8_t blast;
+    uint8_t source_row;
+    uint8_t source_col;
+    uint8_t target_row;
+    uint8_t target_col;
+    uint8_t player_row;
+    uint8_t player_col;
+} mission_push_checkpoint_t;
 
 static volatile mission_state_t s_state = MISSION_BOOT_DELAY;
 static volatile uint8_t s_timer_running = 0u;
 static volatile uint32_t s_elapsed_10ms = 0u;
 static volatile uint32_t s_state_elapsed_10ms = 0u;
 static volatile uint16_t s_abort_hold_10ms = 0u;
+static volatile uint16_t s_push_settle_10ms = 0u;
 static uint32_t s_last_frame_sequence = 0u;
 static uint8_t s_frame_updated = 0u;
 static uint8_t s_have_valid_map = 0u;
@@ -38,9 +73,8 @@ static uint8_t s_candidate_player_row = 0u;
 static uint8_t s_candidate_player_col = 0u;
 static uint8_t s_entry_row = 0u;
 static uint8_t s_entry_col = 0u;
-static uint8_t s_clear_frame_count = 0u;
-static uint8_t s_blast_match_count = 0u;
 static uint8_t s_blast_event_index = 0u;
+static uint8_t s_blast_total = 0u;
 static uint8_t s_segment_running = 0u;
 static uint8_t s_turn_complete = 0u;
 static uint8_t s_inspection_event = 0u;
@@ -52,14 +86,34 @@ static mission_fatal_fault_t s_fatal_fault = MISSION_FATAL_NONE;
 static sokoban_direction_t s_heading = SOKOBAN_DIR_UP;
 static sokoban_status_t s_last_status = SOKOBAN_STATUS_OK;
 static float s_entry_distance = 24.0f;
+static uint16_t s_task_move_index = 0u;
+static uint16_t s_push_checkpoint_index = 0u;
+static uint16_t s_push_checkpoint_total = 0u;
+static uint8_t s_recovery_count = 0u;
+static mission_recovery_status_t s_recovery_status = MISSION_RECOVERY_NONE;
+static uint8_t s_tracking_initialized = 0u;
+static uint8_t s_tracked_box_count = 0u;
+static uint8_t s_tracked_goal_count = 0u;
+static uint8_t s_expected_player_row = 0u;
+static uint8_t s_expected_player_col = 0u;
+static uint8_t s_predicted_player_row = 0u;
+static uint8_t s_predicted_player_col = 0u;
 
 static char s_current_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
 static char s_candidate_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
 static char s_initial_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
+static char s_expected_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
+static char s_predicted_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
+static char s_solver_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
 static sokoban_inspection_plan_t s_inspection_plan;
 static sokoban_label_table_t s_labels;
 static sokoban_solution_t s_task_solution;
 static sokoban_solution_t s_segment_solution;
+static mission_tracked_box_t s_tracked_boxes[SOKOBAN_MAX_BOXES];
+static mission_tracked_box_t s_predicted_boxes[SOKOBAN_MAX_BOXES];
+static mission_tracked_goal_t s_tracked_goals[SOKOBAN_MAX_BOXES];
+static mission_tracked_goal_t s_predicted_goals[SOKOBAN_MAX_BOXES];
+static mission_push_checkpoint_t s_push_checkpoint;
 
 uint8_t label = 0u;
 
@@ -108,16 +162,29 @@ static void mission_reset_level_data(void)
 {
     s_level_result = MISSION_LEVEL_RESULT_NONE;
     mission_reset_map_acquisition();
-    s_clear_frame_count = 0u;
-    s_blast_match_count = 0u;
     s_blast_event_index = 0u;
+    s_blast_total = 0u;
     s_segment_running = 0u;
     s_turn_complete = 0u;
     s_inspection_event = 0u;
     s_inspection_move_index = 0u;
+    s_task_move_index = 0u;
+    s_push_checkpoint_index = 0u;
+    s_push_checkpoint_total = 0u;
+    s_push_settle_10ms = 0u;
+    s_recovery_count = 0u;
+    s_recovery_status = MISSION_RECOVERY_NONE;
+    s_tracking_initialized = 0u;
+    s_tracked_box_count = 0u;
+    s_tracked_goal_count = 0u;
     label = 0u;
     (void)memset(&s_labels, 0, sizeof(s_labels));
     (void)memset(&s_inspection_plan, 0, sizeof(s_inspection_plan));
+    (void)memset(&s_push_checkpoint, 0, sizeof(s_push_checkpoint));
+    (void)memset(s_tracked_boxes, 0, sizeof(s_tracked_boxes));
+    (void)memset(s_predicted_boxes, 0, sizeof(s_predicted_boxes));
+    (void)memset(s_tracked_goals, 0, sizeof(s_tracked_goals));
+    (void)memset(s_predicted_goals, 0, sizeof(s_predicted_goals));
     mission_solution_reset(&s_task_solution);
     mission_solution_reset(&s_segment_solution);
 }
@@ -180,6 +247,204 @@ static uint8_t mission_task_complete(
             }
         }
     }
+    return 1u;
+}
+
+static uint8_t mission_abs_diff(uint8_t lhs, uint8_t rhs)
+{
+    return (uint8_t)(lhs > rhs ? lhs - rhs : rhs - lhs);
+}
+
+static uint8_t mission_cells_near(uint8_t row_a, uint8_t col_a,
+                                  uint8_t row_b, uint8_t col_b)
+{
+    return (uint8_t)((mission_abs_diff(row_a, row_b) <= 1u) &&
+                     (mission_abs_diff(col_a, col_b) <= 1u));
+}
+
+static void mission_normalize_map(
+    const char source[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE],
+    char destination[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE])
+{
+    uint8_t row;
+    uint8_t col;
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            char ch = source[row][col];
+            destination[row][col] = (ch == '@') ? '-' :
+                                    (((ch == '+') || (ch == 'G')) ? '.' : ch);
+        }
+        destination[row][SOKOBAN_MAP_WIDTH] = '\0';
+    }
+}
+
+static uint8_t mission_boundary_is_intact(
+    const char map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE])
+{
+    uint8_t row;
+    uint8_t col;
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            if(((row == 0u) || (col == 0u) ||
+                (row + 1u == SOKOBAN_MAP_HEIGHT) ||
+                (col + 1u == SOKOBAN_MAP_WIDTH)) &&
+               (map[row][col] != '#')) return 0u;
+        }
+    }
+    return 1u;
+}
+
+static uint8_t mission_checkpoint_map_valid(
+    const char map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE],
+    uint8_t player_row,
+    uint8_t player_col)
+{
+    uint8_t normal_boxes = 0u;
+    uint8_t bombs = 0u;
+    uint8_t goals = 0u;
+    uint8_t row;
+    uint8_t col;
+    char player_cell;
+
+    if((player_row >= SOKOBAN_MAP_HEIGHT) ||
+       (player_col >= SOKOBAN_MAP_WIDTH) ||
+       !mission_boundary_is_intact(map)) return 0u;
+    player_cell = map[player_row][player_col];
+    if((player_cell == '#') || (player_cell == '$') ||
+       (player_cell == '*')) return 0u;
+
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            char ch = map[row][col];
+            if(ch == '$') normal_boxes++;
+            else if(ch == '*') bombs++;
+            else if((ch == '.') || (ch == 'G') || (ch == '+')) goals++;
+        }
+    }
+    if((s_current_level == 1u) && (bombs != 0u)) return 0u;
+    return (uint8_t)((normal_boxes == goals) &&
+                     (bombs <= SOKOBAN_MAX_BOMBS) &&
+                     ((uint8_t)(normal_boxes + bombs) <= SOKOBAN_MAX_BOXES));
+}
+
+static void mission_build_solver_map(void)
+{
+    (void)memcpy(s_solver_map, s_expected_map, sizeof(s_solver_map));
+    if(s_solver_map[s_expected_player_row][s_expected_player_col] == '.')
+    {
+        s_solver_map[s_expected_player_row][s_expected_player_col] = '+';
+    }
+    else
+    {
+        s_solver_map[s_expected_player_row][s_expected_player_col] = '@';
+    }
+}
+
+static uint8_t mission_resolve_one_missing_label(void)
+{
+    uint8_t missing_count = 0u;
+    uint8_t missing_is_box = 0u;
+    uint8_t missing_index = 0u;
+    uint8_t missing_label = 0u;
+    uint8_t idx;
+
+    for(idx = 0u; idx < s_labels.box_count; idx++)
+    {
+        if(s_labels.box_labels[idx] == SOKOBAN_BOMB_LABEL) continue;
+        if(s_labels.box_labels[idx] == 0u)
+        {
+            missing_count++;
+            missing_is_box = 1u;
+            missing_index = idx;
+        }
+        else
+        {
+            missing_label ^= s_labels.box_labels[idx];
+        }
+    }
+    for(idx = 0u; idx < s_labels.goal_count; idx++)
+    {
+        if(s_labels.goal_labels[idx] == 0u)
+        {
+            missing_count++;
+            missing_is_box = 0u;
+            missing_index = idx;
+        }
+        else
+        {
+            missing_label ^= s_labels.goal_labels[idx];
+        }
+    }
+    if(missing_count == 0u) return 1u;
+    if((missing_count != 1u) || (missing_label == 0u) ||
+       (missing_label == SOKOBAN_BOMB_LABEL)) return 0u;
+    if(missing_is_box != 0u)
+        s_labels.box_labels[missing_index] = missing_label;
+    else
+        s_labels.goal_labels[missing_index] = missing_label;
+    return 1u;
+}
+
+static uint8_t mission_initialize_tracking(uint8_t player_row,
+                                           uint8_t player_col)
+{
+    uint8_t box_index = 0u;
+    uint8_t goal_index = 0u;
+    uint8_t row;
+    uint8_t col;
+
+    mission_normalize_map(s_initial_map, s_expected_map);
+    s_expected_player_row = player_row;
+    s_expected_player_col = player_col;
+    if(s_current_level == 1u)
+    {
+        s_tracking_initialized = 1u;
+        return 1u;
+    }
+    if(!mission_resolve_one_missing_label()) return 0u;
+    (void)memset(s_tracked_boxes, 0, sizeof(s_tracked_boxes));
+    (void)memset(s_tracked_goals, 0, sizeof(s_tracked_goals));
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            char ch = s_expected_map[row][col];
+            if((ch == '$') || (ch == '*'))
+            {
+                if((box_index >= s_labels.box_count) ||
+                   (box_index >= SOKOBAN_MAX_BOXES)) return 0u;
+                s_tracked_boxes[box_index].row = row;
+                s_tracked_boxes[box_index].col = col;
+                s_tracked_boxes[box_index].label =
+                    s_labels.box_labels[box_index];
+                s_tracked_boxes[box_index].active = 1u;
+                s_tracked_boxes[box_index].bomb = (uint8_t)(ch == '*');
+                box_index++;
+            }
+            else if(ch == '.')
+            {
+                if((goal_index >= s_labels.goal_count) ||
+                   (goal_index >= SOKOBAN_MAX_BOXES)) return 0u;
+                s_tracked_goals[goal_index].row = row;
+                s_tracked_goals[goal_index].col = col;
+                s_tracked_goals[goal_index].label =
+                    s_labels.goal_labels[goal_index];
+                s_tracked_goals[goal_index].active = 1u;
+                goal_index++;
+            }
+        }
+    }
+    if((box_index != s_labels.box_count) ||
+       (goal_index != s_labels.goal_count)) return 0u;
+    s_tracked_box_count = box_index;
+    s_tracked_goal_count = goal_index;
+    s_tracking_initialized = 1u;
     return 1u;
 }
 
@@ -258,6 +523,187 @@ static uint8_t mission_start_one_move(char move, float distance)
     return path_executor_start_with_distance(&s_segment_solution, distance);
 }
 
+static int8_t mission_find_box_at(const mission_tracked_box_t *boxes,
+                                  uint8_t row,
+                                  uint8_t col)
+{
+    uint8_t idx;
+    for(idx = 0u; idx < s_tracked_box_count; idx++)
+    {
+        if((boxes[idx].active != 0u) &&
+           (boxes[idx].row == row) && (boxes[idx].col == col))
+            return (int8_t)idx;
+    }
+    return -1;
+}
+
+static int8_t mission_find_goal_at(const mission_tracked_goal_t *goals,
+                                   uint8_t row,
+                                   uint8_t col)
+{
+    uint8_t idx;
+    for(idx = 0u; idx < s_tracked_goal_count; idx++)
+    {
+        if((goals[idx].row == row) && (goals[idx].col == col))
+            return (int8_t)idx;
+    }
+    return -1;
+}
+
+static uint8_t mission_move_delta(char move, int8_t *dr, int8_t *dc)
+{
+    *dr = 0;
+    *dc = 0;
+    if(move == 'U') *dr = -1;
+    else if(move == 'D') *dr = 1;
+    else if(move == 'L') *dc = -1;
+    else if(move == 'R') *dc = 1;
+    else return 0u;
+    return 1u;
+}
+
+static uint8_t mission_prepare_next_push_segment(void)
+{
+    uint16_t idx;
+    uint8_t player_row = s_expected_player_row;
+    uint8_t player_col = s_expected_player_col;
+
+    (void)memcpy(s_predicted_map, s_expected_map, sizeof(s_predicted_map));
+    (void)memcpy(s_predicted_boxes, s_tracked_boxes,
+                 sizeof(s_predicted_boxes));
+    (void)memcpy(s_predicted_goals, s_tracked_goals,
+                 sizeof(s_predicted_goals));
+    (void)memset(&s_push_checkpoint, 0, sizeof(s_push_checkpoint));
+    s_push_checkpoint.box_index = SOKOBAN_INVALID_CELL;
+    s_push_checkpoint.goal_index = SOKOBAN_INVALID_CELL;
+
+    for(idx = s_task_move_index; idx < s_task_solution.move_count; idx++)
+    {
+        int8_t dr;
+        int8_t dc;
+        int16_t next_row;
+        int16_t next_col;
+        char next_cell;
+        if(!mission_move_delta(s_task_solution.move_seq[idx], &dr, &dc))
+            return 0u;
+        next_row = (int16_t)player_row + dr;
+        next_col = (int16_t)player_col + dc;
+        if((next_row < 0) || (next_col < 0) ||
+           (next_row >= (int16_t)SOKOBAN_MAP_HEIGHT) ||
+           (next_col >= (int16_t)SOKOBAN_MAP_WIDTH)) return 0u;
+        next_cell = s_predicted_map[next_row][next_col];
+        if((next_cell == '$') || (next_cell == '*'))
+        {
+            int16_t target_row = next_row + dr;
+            int16_t target_col = next_col + dc;
+            char target_cell;
+            int8_t box_index = -1;
+            int8_t goal_index = -1;
+            if((target_row <= 0) || (target_col <= 0) ||
+               (target_row + 1 >= (int16_t)SOKOBAN_MAP_HEIGHT) ||
+               (target_col + 1 >= (int16_t)SOKOBAN_MAP_WIDTH)) return 0u;
+            target_cell = s_predicted_map[target_row][target_col];
+            if(s_current_level != 1u)
+            {
+                box_index = mission_find_box_at(s_predicted_boxes,
+                                                (uint8_t)next_row,
+                                                (uint8_t)next_col);
+                if(box_index < 0) return 0u;
+            }
+            s_push_checkpoint.valid = 1u;
+            s_push_checkpoint.box_index = (box_index < 0) ?
+                                          SOKOBAN_INVALID_CELL :
+                                          (uint8_t)box_index;
+            s_push_checkpoint.is_bomb = (uint8_t)(next_cell == '*');
+            s_push_checkpoint.source_row = (uint8_t)next_row;
+            s_push_checkpoint.source_col = (uint8_t)next_col;
+            s_push_checkpoint.target_row = (uint8_t)target_row;
+            s_push_checkpoint.target_col = (uint8_t)target_col;
+            s_predicted_map[next_row][next_col] = '-';
+            player_row = (uint8_t)next_row;
+            player_col = (uint8_t)next_col;
+
+            if((next_cell == '*') && (target_cell == '#'))
+            {
+                uint8_t row;
+                uint8_t col;
+                s_push_checkpoint.blast = 1u;
+                if(box_index >= 0)
+                    s_predicted_boxes[(uint8_t)box_index].active = 0u;
+                for(row = (uint8_t)(target_row - 1);
+                    row <= (uint8_t)(target_row + 1); row++)
+                {
+                    for(col = (uint8_t)(target_col - 1);
+                        col <= (uint8_t)(target_col + 1); col++)
+                    {
+                        if((row != 0u) && (col != 0u) &&
+                           (row + 1u != SOKOBAN_MAP_HEIGHT) &&
+                           (col + 1u != SOKOBAN_MAP_WIDTH) &&
+                           (s_predicted_map[row][col] == '#'))
+                            s_predicted_map[row][col] = '-';
+                    }
+                }
+            }
+            else
+            {
+                if((target_cell != '-') && (target_cell != '.')) return 0u;
+                if((next_cell == '*') && (target_cell == '.')) return 0u;
+                if((next_cell == '$') && (target_cell == '.'))
+                {
+                    if(s_current_level != 1u)
+                    {
+                        goal_index = mission_find_goal_at(
+                            s_predicted_goals,
+                            (uint8_t)target_row,
+                            (uint8_t)target_col);
+                        if((goal_index < 0) ||
+                           (s_predicted_boxes[(uint8_t)box_index].label !=
+                            s_predicted_goals[(uint8_t)goal_index].label))
+                            return 0u;
+                        s_predicted_boxes[(uint8_t)box_index].active = 0u;
+                        s_predicted_goals[(uint8_t)goal_index].active = 0u;
+                        s_push_checkpoint.goal_index = (uint8_t)goal_index;
+                    }
+                    s_predicted_map[target_row][target_col] = '-';
+                }
+                else
+                {
+                    s_predicted_map[target_row][target_col] = next_cell;
+                    if(box_index >= 0)
+                    {
+                        s_predicted_boxes[(uint8_t)box_index].row =
+                            (uint8_t)target_row;
+                        s_predicted_boxes[(uint8_t)box_index].col =
+                            (uint8_t)target_col;
+                    }
+                }
+            }
+            s_predicted_player_row = player_row;
+            s_predicted_player_col = player_col;
+            s_push_checkpoint.player_row = player_row;
+            s_push_checkpoint.player_col = player_col;
+            if(!mission_start_segment(&s_task_solution, s_task_move_index,
+                                      (uint16_t)(idx + 1u))) return 0u;
+            s_task_move_index = (uint16_t)(idx + 1u);
+            s_segment_running = 1u;
+            mission_set_state(MISSION_EXECUTE_PUSH);
+            return 1u;
+        }
+        if((next_cell != '-') && (next_cell != '.')) return 0u;
+        player_row = (uint8_t)next_row;
+        player_col = (uint8_t)next_col;
+    }
+    return 0u;
+}
+
+static void mission_reset_push_map_acquisition(void)
+{
+    s_map_stable_frames = 0u;
+    s_frame_updated = 0u;
+    s_last_frame_sequence = camera_frame_sequence;
+    (void)memset(s_candidate_map, 0, sizeof(s_candidate_map));
+}
+
 static void mission_start_return(void)
 {
     s_segment_running = 0u;
@@ -284,6 +730,391 @@ static void mission_abort_level(sokoban_status_t status)
     path_executor_abort();
     MecanumCarStop();
     mission_start_return();
+}
+
+static void mission_commit_predicted_state(void)
+{
+    (void)memcpy(s_expected_map, s_predicted_map, sizeof(s_expected_map));
+    (void)memcpy(s_tracked_boxes, s_predicted_boxes,
+                 sizeof(s_tracked_boxes));
+    (void)memcpy(s_tracked_goals, s_predicted_goals,
+                 sizeof(s_tracked_goals));
+    s_expected_player_row = s_predicted_player_row;
+    s_expected_player_col = s_predicted_player_col;
+}
+
+static int8_t mission_find_rebuilt_box_at(
+    const mission_tracked_box_t *boxes,
+    uint8_t row,
+    uint8_t col)
+{
+    uint8_t idx;
+    for(idx = 0u; idx < s_tracked_box_count; idx++)
+    {
+        if((boxes[idx].active != 0u) &&
+           (boxes[idx].row == row) && (boxes[idx].col == col))
+            return (int8_t)idx;
+    }
+    return -1;
+}
+
+static uint8_t mission_rebuild_labeled_state(
+    const char actual_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE],
+    uint8_t player_row,
+    uint8_t player_col,
+    mission_recovery_status_t *recovery_status)
+{
+    mission_tracked_box_t rebuilt_boxes[SOKOBAN_MAX_BOXES];
+    mission_tracked_goal_t rebuilt_goals[SOKOBAN_MAX_BOXES];
+    uint8_t actual_rows[SOKOBAN_MAX_BOXES];
+    uint8_t actual_cols[SOKOBAN_MAX_BOXES];
+    uint8_t actual_matched[SOKOBAN_MAX_BOXES];
+    uint8_t actual_count = 0u;
+    uint8_t player_changed;
+    uint8_t box_changed = 0u;
+    uint8_t idx;
+    uint8_t row;
+    uint8_t col;
+
+    if(!mission_cells_near(player_row, player_col,
+                           s_predicted_player_row,
+                           s_predicted_player_col)) return 0u;
+    player_changed = (uint8_t)((player_row != s_predicted_player_row) ||
+                               (player_col != s_predicted_player_col));
+    (void)memcpy(rebuilt_boxes, s_predicted_boxes, sizeof(rebuilt_boxes));
+    (void)memcpy(rebuilt_goals, s_predicted_goals, sizeof(rebuilt_goals));
+    (void)memset(actual_matched, 0, sizeof(actual_matched));
+
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            if(actual_map[row][col] == '$')
+            {
+                if(actual_count >= SOKOBAN_MAX_BOXES) return 0u;
+                actual_rows[actual_count] = row;
+                actual_cols[actual_count] = col;
+                actual_count++;
+            }
+        }
+    }
+
+    for(idx = 0u; idx < s_tracked_box_count; idx++)
+    {
+        uint8_t actual_idx;
+        uint8_t found = 0u;
+        if((rebuilt_boxes[idx].bomb != 0u) ||
+           (idx == s_push_checkpoint.box_index) ||
+           (rebuilt_boxes[idx].active == 0u)) continue;
+        for(actual_idx = 0u; actual_idx < actual_count; actual_idx++)
+        {
+            if((actual_matched[actual_idx] == 0u) &&
+               (actual_rows[actual_idx] == rebuilt_boxes[idx].row) &&
+               (actual_cols[actual_idx] == rebuilt_boxes[idx].col))
+            {
+                actual_matched[actual_idx] = 1u;
+                found = 1u;
+                break;
+            }
+        }
+        if(found == 0u) return 0u;
+    }
+
+    if((s_push_checkpoint.is_bomb == 0u) &&
+       (s_push_checkpoint.box_index < s_tracked_box_count))
+    {
+        uint8_t box_index = s_push_checkpoint.box_index;
+        uint8_t candidate = SOKOBAN_INVALID_CELL;
+        uint8_t candidate_count = 0u;
+        uint8_t same_offset_candidate = SOKOBAN_INVALID_CELL;
+        int8_t player_offset_row = (int8_t)player_row -
+                                   (int8_t)s_predicted_player_row;
+        int8_t player_offset_col = (int8_t)player_col -
+                                   (int8_t)s_predicted_player_col;
+        uint8_t expected_row = (rebuilt_boxes[box_index].active != 0u) ?
+                               rebuilt_boxes[box_index].row :
+                               s_push_checkpoint.target_row;
+        uint8_t expected_col = (rebuilt_boxes[box_index].active != 0u) ?
+                               rebuilt_boxes[box_index].col :
+                               s_push_checkpoint.target_col;
+        uint8_t actual_idx;
+        for(actual_idx = 0u; actual_idx < actual_count; actual_idx++)
+        {
+            if((actual_matched[actual_idx] == 0u) &&
+               mission_cells_near(actual_rows[actual_idx],
+                                  actual_cols[actual_idx],
+                                  expected_row, expected_col))
+            {
+                candidate = actual_idx;
+                candidate_count++;
+                if(((int16_t)actual_rows[actual_idx] ==
+                    (int16_t)expected_row + player_offset_row) &&
+                   ((int16_t)actual_cols[actual_idx] ==
+                    (int16_t)expected_col + player_offset_col))
+                {
+                    same_offset_candidate = actual_idx;
+                }
+            }
+        }
+        if(same_offset_candidate != SOKOBAN_INVALID_CELL)
+        {
+            candidate = same_offset_candidate;
+            candidate_count = 1u;
+        }
+        else if(candidate_count > 1u)
+            return 0u;
+        if(candidate_count == 1u)
+        {
+            rebuilt_boxes[box_index].active = 1u;
+            rebuilt_boxes[box_index].row = actual_rows[candidate];
+            rebuilt_boxes[box_index].col = actual_cols[candidate];
+            actual_matched[candidate] = 1u;
+            box_changed = (uint8_t)(
+                (actual_rows[candidate] != expected_row) ||
+                (actual_cols[candidate] != expected_col) ||
+                (s_predicted_boxes[box_index].active == 0u));
+            if(box_changed != 0u)
+            {
+                if((player_row == actual_rows[candidate]) &&
+                   (player_col == actual_cols[candidate])) return 0u;
+                if(!mission_cells_near(player_row, player_col,
+                                       actual_rows[candidate],
+                                       actual_cols[candidate])) return 0u;
+            }
+        }
+        else if(rebuilt_boxes[box_index].active != 0u)
+        {
+            return 0u;
+        }
+    }
+
+    for(idx = 0u; idx < actual_count; idx++)
+        if(actual_matched[idx] == 0u) return 0u;
+
+    for(idx = 0u; idx < s_tracked_goal_count; idx++)
+        rebuilt_goals[idx].active = 0u;
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            if(actual_map[row][col] == '.')
+            {
+                int8_t goal_index = mission_find_goal_at(
+                    s_tracked_goals, row, col);
+                if(goal_index < 0) return 0u;
+                rebuilt_goals[(uint8_t)goal_index].active = 1u;
+            }
+        }
+    }
+
+    for(idx = 0u; idx < s_tracked_box_count; idx++)
+    {
+        uint8_t goal_idx;
+        uint8_t matching_goal_active = 0u;
+        if(rebuilt_boxes[idx].bomb != 0u)
+        {
+            rebuilt_boxes[idx].active = 0u;
+            continue;
+        }
+        for(goal_idx = 0u; goal_idx < s_tracked_goal_count; goal_idx++)
+        {
+            if(rebuilt_goals[goal_idx].label == rebuilt_boxes[idx].label)
+            {
+                matching_goal_active = rebuilt_goals[goal_idx].active;
+                break;
+            }
+        }
+        if(goal_idx >= s_tracked_goal_count) return 0u;
+        if(rebuilt_boxes[idx].active != matching_goal_active) return 0u;
+    }
+
+    {
+        uint8_t bomb_slot = 0u;
+        for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+        {
+            for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+            {
+                if(actual_map[row][col] == '*')
+                {
+                    while((bomb_slot < s_tracked_box_count) &&
+                          (s_tracked_boxes[bomb_slot].bomb == 0u)) bomb_slot++;
+                    if(bomb_slot >= s_tracked_box_count) return 0u;
+                    rebuilt_boxes[bomb_slot].active = 1u;
+                    rebuilt_boxes[bomb_slot].row = row;
+                    rebuilt_boxes[bomb_slot].col = col;
+                    rebuilt_boxes[bomb_slot].label = SOKOBAN_BOMB_LABEL;
+                    bomb_slot++;
+                }
+            }
+        }
+    }
+
+    (void)memset(&s_labels, 0, sizeof(s_labels));
+    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
+    {
+        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
+        {
+            char ch = actual_map[row][col];
+            if((ch == '$') || (ch == '*'))
+            {
+                int8_t box_index;
+                if(s_labels.box_count >= SOKOBAN_MAX_BOXES) return 0u;
+                if(ch == '*')
+                {
+                    s_labels.box_labels[s_labels.box_count] =
+                        SOKOBAN_BOMB_LABEL;
+                }
+                else
+                {
+                    box_index = mission_find_rebuilt_box_at(
+                        rebuilt_boxes, row, col);
+                    if((box_index < 0) ||
+                       (rebuilt_boxes[(uint8_t)box_index].bomb != 0u)) return 0u;
+                    s_labels.box_labels[s_labels.box_count] =
+                        rebuilt_boxes[(uint8_t)box_index].label;
+                }
+                s_labels.box_count++;
+            }
+            else if(ch == '.')
+            {
+                int8_t goal_index;
+                if(s_labels.goal_count >= SOKOBAN_MAX_BOXES) return 0u;
+                goal_index = mission_find_goal_at(rebuilt_goals, row, col);
+                if((goal_index < 0) ||
+                   (rebuilt_goals[(uint8_t)goal_index].active == 0u)) return 0u;
+                s_labels.goal_labels[s_labels.goal_count++] =
+                    rebuilt_goals[(uint8_t)goal_index].label;
+            }
+        }
+    }
+
+    (void)memcpy(s_tracked_boxes, rebuilt_boxes, sizeof(s_tracked_boxes));
+    (void)memcpy(s_tracked_goals, rebuilt_goals, sizeof(s_tracked_goals));
+    (void)memcpy(s_expected_map, actual_map, sizeof(s_expected_map));
+    s_expected_player_row = player_row;
+    s_expected_player_col = player_col;
+    if(box_changed != 0u) *recovery_status = MISSION_RECOVERY_BOX;
+    else if(player_changed != 0u) *recovery_status = MISSION_RECOVERY_PLAYER;
+    else *recovery_status = MISSION_RECOVERY_ACTUAL_MAP;
+    return 1u;
+}
+
+static void mission_finish_success(void)
+{
+    s_level_result = MISSION_LEVEL_RESULT_SUCCESS;
+    mission_start_return();
+}
+
+static void mission_handle_push_checkpoint(void)
+{
+    mission_recovery_status_t recovery_status = MISSION_RECOVERY_ACTUAL_MAP;
+    uint8_t exact_map;
+    uint8_t exact_player;
+    uint8_t recovered = 0u;
+
+    mission_normalize_map(s_current_map, s_solver_map);
+    exact_map = (uint8_t)(memcmp(s_solver_map, s_predicted_map,
+                                 sizeof(s_solver_map)) == 0);
+    exact_player = (uint8_t)((s_player_row == s_predicted_player_row) &&
+                             (s_player_col == s_predicted_player_col));
+    s_push_checkpoint_index++;
+    if(s_push_checkpoint.blast != 0u) s_blast_event_index++;
+
+    if((exact_map != 0u) && (exact_player != 0u))
+    {
+        mission_commit_predicted_state();
+        s_recovery_status = MISSION_RECOVERY_EXACT;
+    }
+    else
+    {
+        if(s_recovery_count >= MISSION_MAX_RECOVERIES)
+        {
+            s_recovery_status = MISSION_RECOVERY_REJECTED;
+            mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+            return;
+        }
+        if(!mission_cells_near(s_player_row, s_player_col,
+                               s_predicted_player_row,
+                               s_predicted_player_col))
+        {
+            s_recovery_status = MISSION_RECOVERY_REJECTED;
+            mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+            return;
+        }
+        if(s_current_level == 1u)
+        {
+            (void)memcpy(s_expected_map, s_solver_map,
+                         sizeof(s_expected_map));
+            s_expected_player_row = s_player_row;
+            s_expected_player_col = s_player_col;
+            recovery_status = (exact_map != 0u) ?
+                              MISSION_RECOVERY_PLAYER :
+                              MISSION_RECOVERY_ACTUAL_MAP;
+            recovered = 1u;
+        }
+        else if(mission_rebuild_labeled_state(
+                    s_solver_map, s_player_row, s_player_col,
+                    &recovery_status))
+        {
+            recovered = 1u;
+        }
+        if(recovered == 0u)
+        {
+            s_recovery_status = MISSION_RECOVERY_REJECTED;
+            mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+            return;
+        }
+        s_recovery_count++;
+        s_recovery_status = recovery_status;
+    }
+
+    if(mission_task_complete(s_current_map))
+    {
+        mission_finish_success();
+        return;
+    }
+    if(recovered != 0u)
+    {
+        mission_set_state((s_current_level == 1u) ?
+                          MISSION_PLAN_PLAIN_PUSH :
+                          MISSION_PLAN_LABELED_PUSH);
+    }
+    else if(!mission_prepare_next_push_segment())
+    {
+        mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+    }
+}
+
+static void mission_update_push_map_stability(void)
+{
+    uint8_t same;
+    if(s_frame_updated == 0u) return;
+    if(!mission_checkpoint_map_valid(s_current_map,
+                                     s_player_row, s_player_col))
+    {
+        s_map_stable_frames = 0u;
+        return;
+    }
+    same = (uint8_t)((s_map_stable_frames != 0u) &&
+                     (s_candidate_player_row == s_player_row) &&
+                     (s_candidate_player_col == s_player_col) &&
+                     (memcmp(s_candidate_map, s_current_map,
+                             sizeof(s_candidate_map)) == 0));
+    if(same != 0u)
+    {
+        if(s_map_stable_frames < MISSION_MAP_STABLE_FRAMES)
+            s_map_stable_frames++;
+    }
+    else
+    {
+        (void)memcpy(s_candidate_map, s_current_map,
+                     sizeof(s_candidate_map));
+        s_candidate_player_row = s_player_row;
+        s_candidate_player_col = s_player_col;
+        s_map_stable_frames = 1u;
+    }
+    if(s_map_stable_frames >= MISSION_MAP_STABLE_FRAMES)
+        mission_handle_push_checkpoint();
 }
 
 static void mission_advance_level(void)
@@ -375,35 +1206,6 @@ static void mission_update_map_stability(void)
     }
 }
 
-static uint8_t mission_blast_map_matches(uint8_t blast_index)
-{
-    uint8_t row;
-    uint8_t col;
-    for(row = 0u; row < SOKOBAN_MAP_HEIGHT; row++)
-    {
-        for(col = 0u; col < SOKOBAN_MAP_WIDTH; col++)
-        {
-            uint8_t boundary = (uint8_t)((row == 0u) || (col == 0u) ||
-                                         (row + 1u == SOKOBAN_MAP_HEIGHT) ||
-                                         (col + 1u == SOKOBAN_MAP_WIDTH));
-            if(boundary && (s_initial_map[row][col] == '#') &&
-               (s_current_map[row][col] != '#')) return 0u;
-            if(!boundary && (s_initial_map[row][col] == '#'))
-            {
-                uint8_t blast_row = s_task_solution.blast_rows[blast_index];
-                uint8_t blast_col = s_task_solution.blast_cols[blast_index];
-                uint8_t dr = (uint8_t)(row > blast_row ?
-                                       row - blast_row : blast_row - row);
-                uint8_t dc = (uint8_t)(col > blast_col ?
-                                       col - blast_col : blast_col - col);
-                if((dr <= 1u) && (dc <= 1u) &&
-                   (s_current_map[row][col] == '#')) return 0u;
-            }
-        }
-    }
-    return 1u;
-}
-
 void mission_controller_init(void)
 {
     s_state = MISSION_BOOT_DELAY;
@@ -427,6 +1229,18 @@ void mission_controller_update_10ms(void)
 {
     s_state_elapsed_10ms++;
     if(s_timer_running != 0u) s_elapsed_10ms++;
+    if(s_state == MISSION_WAIT_PUSH_SETTLE)
+    {
+        if(mission_encoder_is_still() != 0u)
+        {
+            if(s_push_settle_10ms < MISSION_PUSH_SETTLE_STILL_10MS)
+                s_push_settle_10ms++;
+        }
+        else
+        {
+            s_push_settle_10ms = 0u;
+        }
+    }
     if(s_state == MISSION_ABORT_HOLD)
     {
         if(mission_encoder_is_still() != 0u)
@@ -500,26 +1314,32 @@ void mission_controller_process(void)
             break;
 
         case MISSION_PLAN_PLAIN_PUSH:
+            if((s_tracking_initialized == 0u) &&
+               !mission_initialize_tracking(s_entry_row, s_entry_col))
+            {
+                mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+                break;
+            }
+            mission_build_solver_map();
             mission_solution_reset(&s_task_solution);
-            s_last_status = sokoban_solve_decomposed(s_initial_map,
+            s_last_status = sokoban_solve_decomposed(s_solver_map,
                                                       &s_task_solution);
             if(s_last_status != SOKOBAN_STATUS_OK)
             {
                 s_last_status = sokoban_solve_bidirectional_astar(
-                    s_initial_map, &s_task_solution);
+                    s_solver_map, &s_task_solution);
             }
             if(s_last_status != SOKOBAN_STATUS_OK)
             {
                 mission_abort_level(s_last_status);
             }
-            else if(path_executor_start(&s_task_solution))
-            {
-                s_segment_running = 1u;
-                mission_set_state(MISSION_EXECUTE_PUSH);
-            }
             else
             {
-                mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+                s_task_move_index = 0u;
+                s_push_checkpoint_total = (uint16_t)(
+                    s_push_checkpoint_index + s_task_solution.push_count);
+                if(!mission_prepare_next_push_segment())
+                    mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
             }
             break;
 
@@ -604,10 +1424,19 @@ void mission_controller_process(void)
         } break;
 
         case MISSION_PLAN_LABELED_PUSH:
+            if((s_tracking_initialized == 0u) &&
+               !mission_initialize_tracking(
+                   s_inspection_plan.final_row,
+                   s_inspection_plan.final_col))
+            {
+                mission_abort_level(SOKOBAN_STATUS_INVALID_LABELS);
+                break;
+            }
+            mission_build_solver_map();
             s_last_status = sokoban_solve_labeled(
-                s_initial_map,
-                s_inspection_plan.final_row,
-                s_inspection_plan.final_col,
+                s_solver_map,
+                s_expected_player_row,
+                s_expected_player_col,
                 &s_labels,
                 &s_task_solution);
             if(s_last_status != SOKOBAN_STATUS_OK)
@@ -616,24 +1445,13 @@ void mission_controller_process(void)
             }
             else
             {
-                uint16_t end;
-                s_blast_event_index = 0u;
-                end = (s_task_solution.blast_count != 0u) ?
-                      (uint16_t)(s_task_solution.blast_move_indices[0] + 1u) :
-                      s_task_solution.move_count;
-                if(end == 0u)
-                {
-                    mission_set_state(MISSION_WAIT_MAP_CLEAR);
-                }
-                else if(mission_start_segment(&s_task_solution, 0u, end))
-                {
-                    s_segment_running = 1u;
-                    mission_set_state(MISSION_EXECUTE_PUSH);
-                }
-                else
-                {
+                s_task_move_index = 0u;
+                s_push_checkpoint_total = (uint16_t)(
+                    s_push_checkpoint_index + s_task_solution.push_count);
+                s_blast_total = (uint8_t)(
+                    s_blast_event_index + s_task_solution.blast_count);
+                if(!mission_prepare_next_push_segment())
                     mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
-                }
             }
             break;
 
@@ -641,86 +1459,31 @@ void mission_controller_process(void)
             if(path_executor_is_done())
             {
                 s_segment_running = 0u;
-                s_clear_frame_count = 0u;
-                if(s_blast_event_index < s_task_solution.blast_count)
-                {
-                    s_blast_match_count = 0u;
-                    mission_set_state(MISSION_WAIT_BLAST_MAP);
-                }
-                else
-                {
-                    mission_set_state(MISSION_WAIT_MAP_CLEAR);
-                }
+                MecanumCarStop();
+                s_push_settle_10ms = 0u;
+                mission_set_state(MISSION_WAIT_PUSH_SETTLE);
             }
             break;
 
-        case MISSION_WAIT_BLAST_MAP:
-            if(s_frame_updated != 0u)
+        case MISSION_WAIT_PUSH_SETTLE:
+            MecanumCarStop();
+            if(s_push_settle_10ms >= MISSION_PUSH_SETTLE_STILL_10MS)
             {
-                if(mission_blast_map_matches(s_blast_event_index))
-                {
-                    if(s_blast_match_count < MISSION_BLAST_STABLE_FRAMES)
-                    {
-                        s_blast_match_count++;
-                    }
-                }
-                else
-                {
-                    s_blast_match_count = 0u;
-                }
+                mission_reset_push_map_acquisition();
+                mission_set_state(MISSION_WAIT_PUSH_MAP);
             }
-            if(s_blast_match_count >= MISSION_BLAST_STABLE_FRAMES)
+            else if(s_state_elapsed_10ms >= MISSION_PUSH_SETTLE_TIMEOUT_10MS)
             {
-                uint16_t begin = (uint16_t)(
-                    s_task_solution.blast_move_indices[s_blast_event_index] +
-                    1u);
-                uint16_t end;
-                s_blast_event_index++;
-                end = (s_blast_event_index < s_task_solution.blast_count) ?
-                      (uint16_t)(s_task_solution.blast_move_indices[
-                          s_blast_event_index] + 1u) :
-                      s_task_solution.move_count;
-                if(begin == s_task_solution.move_count)
-                {
-                    mission_set_state(MISSION_WAIT_MAP_CLEAR);
-                }
-                else if(mission_start_segment(&s_task_solution, begin, end))
-                {
-                    s_segment_running = 1u;
-                    mission_set_state(MISSION_EXECUTE_PUSH);
-                }
-                else
-                {
-                    mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
-                }
-            }
-            else if(s_state_elapsed_10ms >= MISSION_RENDER_TIMEOUT_10MS)
-            {
-                mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
+                mission_enter_fatal(MISSION_FATAL_PATH,
+                                    SOKOBAN_STATUS_INVALID_MAP);
             }
             break;
 
-        case MISSION_WAIT_MAP_CLEAR:
-            if(s_frame_updated != 0u)
-            {
-                if(mission_task_complete(s_current_map))
-                {
-                    if(s_clear_frame_count < MISSION_MAP_STABLE_FRAMES)
-                    {
-                        s_clear_frame_count++;
-                    }
-                }
-                else
-                {
-                    s_clear_frame_count = 0u;
-                }
-            }
-            if(s_clear_frame_count >= MISSION_MAP_STABLE_FRAMES)
-            {
-                s_level_result = MISSION_LEVEL_RESULT_SUCCESS;
-                mission_start_return();
-            }
-            else if(s_state_elapsed_10ms >= MISSION_RENDER_TIMEOUT_10MS)
+        case MISSION_WAIT_PUSH_MAP:
+            MecanumCarStop();
+            mission_update_push_map_stability();
+            if((s_state == MISSION_WAIT_PUSH_MAP) &&
+               (s_state_elapsed_10ms >= MISSION_RENDER_TIMEOUT_10MS))
             {
                 mission_abort_level(SOKOBAN_STATUS_INVALID_MAP);
             }
@@ -892,9 +1655,31 @@ uint8_t mission_controller_get_map_stable_frames(void)
     return s_map_stable_frames;
 }
 
+uint16_t mission_controller_get_push_checkpoint_index(void)
+{
+    return s_push_checkpoint_index;
+}
+
+uint16_t mission_controller_get_push_checkpoint_total(void)
+{
+    return s_push_checkpoint_total;
+}
+
+uint8_t mission_controller_get_recovery_count(void)
+{
+    return s_recovery_count;
+}
+
+mission_recovery_status_t mission_controller_get_recovery_status(void)
+{
+    return s_recovery_status;
+}
+
 uint8_t mission_controller_should_stop(void)
 {
     return (uint8_t)((s_state == MISSION_BOOT_DELAY) ||
+                     (s_state == MISSION_WAIT_PUSH_SETTLE) ||
+                     (s_state == MISSION_WAIT_PUSH_MAP) ||
                      (s_state == MISSION_ABORT_HOLD) ||
                      (s_state == MISSION_FINISHED) ||
                      (s_state == MISSION_FAULT));
@@ -1241,5 +2026,5 @@ uint8_t mission_controller_get_blast_event_index(void)
 
 uint8_t mission_controller_get_blast_count(void)
 {
-    return s_task_solution.blast_count;
+    return s_blast_total;
 }
