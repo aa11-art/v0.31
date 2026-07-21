@@ -856,6 +856,70 @@ static void run_labeled_bomb_test(void)
     }
 }
 
+static void run_missing_label_tests(void)
+{
+    sokoban_label_table_t labels;
+    sokoban_solution_t solution;
+    sokoban_status_t status;
+
+    (void)memset(&labels, 0, sizeof(labels));
+    labels.box_count = 1u;
+    labels.goal_count = 1u;
+    labels.box_labels[0] = 7u;
+    status = sokoban_solve_labeled(g_single_box_map, 3u, 5u,
+                                   &labels, &solution);
+    if((status != SOKOBAN_STATUS_OK) || (solution.solved == 0u))
+    {
+        printf("[missing_goal_label] unexpected result\r\n");
+    }
+
+    (void)memset(&labels, 0, sizeof(labels));
+    labels.box_count = 1u;
+    labels.goal_count = 1u;
+    labels.goal_labels[0] = 7u;
+    status = sokoban_solve_labeled(g_single_box_map, 3u, 5u,
+                                   &labels, &solution);
+    if((status != SOKOBAN_STATUS_OK) || (solution.solved == 0u))
+    {
+        printf("[missing_box_label] unexpected result\r\n");
+    }
+
+    (void)memset(&labels, 0, sizeof(labels));
+    labels.box_count = 2u;
+    labels.goal_count = 2u;
+    labels.box_labels[0] = 3u;
+    labels.box_labels[1] = 7u;
+    labels.goal_labels[0] = 3u;
+    status = sokoban_solve_labeled(g_test_map, 5u, 5u,
+                                   &labels, &solution);
+    if((status != SOKOBAN_STATUS_OK) || (solution.solved == 0u))
+    {
+        printf("[missing_label_multi_pair] unexpected result\r\n");
+    }
+
+    (void)memset(&labels, 0, sizeof(labels));
+    labels.box_count = 2u;
+    labels.goal_count = 1u;
+    labels.box_labels[0] = 1u;
+    labels.box_labels[1] = SOKOBAN_BOMB_LABEL;
+    status = sokoban_solve_labeled(g_labeled_bomb_map, 6u, 6u,
+                                   &labels, &solution);
+    if((status != SOKOBAN_STATUS_OK) || (solution.solved == 0u))
+    {
+        printf("[missing_label_with_bomb] unexpected result\r\n");
+    }
+
+    (void)memset(&labels, 0, sizeof(labels));
+    labels.box_count = 1u;
+    labels.goal_count = 1u;
+    status = sokoban_solve_labeled(g_single_box_map, 3u, 5u,
+                                   &labels, &solution);
+    if(status != SOKOBAN_STATUS_INVALID_LABELS)
+    {
+        printf("[two_missing_labels] unexpected result\r\n");
+    }
+}
+
 static void run_multi_bomb_tests(void)
 {
     sokoban_label_table_t labels;
@@ -978,6 +1042,7 @@ void sokoban_debug_once(void)
     run_direction_tests();
     run_inspection_test();
     run_labeled_bomb_test();
+    run_missing_label_tests();
     run_multi_bomb_tests();
 
     status = sokoban_solve_decomposed(g_test_map, &solution);
