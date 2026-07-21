@@ -2472,6 +2472,60 @@ static uint8_t sk_labeled_add(sk_labeled_search_t *search,
     return 1u;
 }
 
+static uint8_t sk_complete_one_missing_label(sokoban_label_table_t *labels,
+                                             uint8_t box_count,
+                                             uint8_t goal_count)
+{
+    uint8_t missing_count = 0u;
+    uint8_t missing_is_box = 0u;
+    uint8_t missing_index = 0u;
+    uint8_t missing_label = 0u;
+    uint8_t idx;
+
+    for(idx = 0u; idx < box_count; idx++)
+    {
+        if(sk_labeled_bomb_slot(idx) >= 0) continue;
+        if(labels->box_labels[idx] == 0u)
+        {
+            missing_count++;
+            missing_is_box = 1u;
+            missing_index = idx;
+        }
+        else
+        {
+            missing_label ^= labels->box_labels[idx];
+        }
+    }
+    for(idx = 0u; idx < goal_count; idx++)
+    {
+        if(labels->goal_labels[idx] == 0u)
+        {
+            missing_count++;
+            missing_is_box = 0u;
+            missing_index = idx;
+        }
+        else
+        {
+            missing_label ^= labels->goal_labels[idx];
+        }
+    }
+
+    if(missing_count == 0u) return 1u;
+    if((missing_count != 1u) || (missing_label == 0u) ||
+       (missing_label == SOKOBAN_BOMB_LABEL)) return 0u;
+
+    /* Paired labels cancel out, leaving the one unpaired label. */
+    if(missing_is_box != 0u)
+    {
+        labels->box_labels[missing_index] = missing_label;
+    }
+    else
+    {
+        labels->goal_labels[missing_index] = missing_label;
+    }
+    return 1u;
+}
+
 static sokoban_status_t sk_parse_labeled_problem(
     const char map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE],
     uint8_t start_row,
@@ -2483,6 +2537,7 @@ static sokoban_status_t sk_parse_labeled_problem(
     uint8_t box_count = 0u;
     uint8_t goal_count = 0u;
     uint8_t idx;
+    sokoban_label_table_t resolved_labels;
 
     (void)memset(&s_labeled_problem, 0, sizeof(s_labeled_problem));
     for(idx = 0u; idx < SOKOBAN_MAX_BOMBS; idx++)
@@ -2522,6 +2577,11 @@ static sokoban_status_t sk_parse_labeled_problem(
     {
         return SOKOBAN_STATUS_INVALID_LABELS;
     }
+    resolved_labels = *labels;
+    if(!sk_complete_one_missing_label(&resolved_labels, box_count, goal_count))
+    {
+        return SOKOBAN_STATUS_INVALID_LABELS;
+    }
     s_labeled_problem.box_count = box_count;
     s_labeled_problem.goal_count = goal_count;
     s_labeled_problem.start_player = (uint8_t)(start_row * SOKOBAN_MAP_WIDTH + start_col);
@@ -2536,10 +2596,12 @@ static sokoban_status_t sk_parse_labeled_problem(
     for(idx = 0u; idx < goal_count; idx++)
     {
         uint8_t other;
-        if((labels->goal_labels[idx] == 0u) || (labels->goal_labels[idx] == SOKOBAN_BOMB_LABEL))
+        if((resolved_labels.goal_labels[idx] == 0u) ||
+           (resolved_labels.goal_labels[idx] == SOKOBAN_BOMB_LABEL))
             return SOKOBAN_STATUS_INVALID_LABELS;
         for(other = 0u; other < idx; other++)
-            if(labels->goal_labels[other] == labels->goal_labels[idx]) return SOKOBAN_STATUS_INVALID_LABELS;
+            if(resolved_labels.goal_labels[other] ==
+               resolved_labels.goal_labels[idx]) return SOKOBAN_STATUS_INVALID_LABELS;
     }
     for(idx = 0u; idx < box_count; idx++)
     {
@@ -2547,7 +2609,7 @@ static sokoban_status_t sk_parse_labeled_problem(
         uint8_t other;
         uint8_t goal_idx;
         uint8_t found = 0u;
-        uint8_t label = labels->box_labels[idx];
+        uint8_t label = resolved_labels.box_labels[idx];
         if(bomb_slot >= 0)
         {
             if(label != SOKOBAN_BOMB_LABEL) return SOKOBAN_STATUS_INVALID_LABELS;
@@ -2556,11 +2618,12 @@ static sokoban_status_t sk_parse_labeled_problem(
         if(label == 0u) return SOKOBAN_STATUS_INVALID_LABELS;
         if(label == SOKOBAN_BOMB_LABEL) return SOKOBAN_STATUS_INVALID_LABELS;
         for(other = 0u; other < idx; other++)
-            if((sk_labeled_bomb_slot(other) < 0) && (labels->box_labels[other] == label))
+            if((sk_labeled_bomb_slot(other) < 0) &&
+               (resolved_labels.box_labels[other] == label))
                 return SOKOBAN_STATUS_INVALID_LABELS;
         for(goal_idx = 0u; goal_idx < goal_count; goal_idx++)
         {
-            if(labels->goal_labels[goal_idx] == label)
+            if(resolved_labels.goal_labels[goal_idx] == label)
             {
                 s_labeled_problem.box_goal_cells[idx] = s_labeled_problem.goal_cells[goal_idx];
                 s_labeled_problem.normal_box_mask |= (uint16_t)1u << idx;

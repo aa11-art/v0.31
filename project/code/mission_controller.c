@@ -587,7 +587,18 @@ void mission_controller_process(void)
                     s_labels.goal_labels[event->object_index];
             if(label != 0u)
             {
-                s_inspection_event++;
+                if((uint8_t)(s_inspection_event + 2u) ==
+                   s_inspection_plan.event_count)
+                {
+                    s_inspection_plan.final_row = event->stand_row;
+                    s_inspection_plan.final_col = event->stand_col;
+                    s_inspection_plan.final_heading = event->face_direction;
+                    s_inspection_event = s_inspection_plan.event_count;
+                }
+                else
+                {
+                    s_inspection_event++;
+                }
                 mission_set_state(MISSION_EXECUTE_INSPECTION);
             }
         } break;
