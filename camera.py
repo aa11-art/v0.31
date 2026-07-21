@@ -5,7 +5,7 @@ GRID_COLS = 16
 GRID_ROWS = 12
 FRAME_W = 320
 FRAME_H = 240
-MAP_ROI = (36, 21, 240, 174)
+MAP_ROI = (43, 42, 220, 158)
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -32,12 +32,12 @@ UART_BAUD = 115200
 FIXED_EXPOSURE_US = 326
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
-	"box": (47, 100, -44, 127, 127, -8),
-	"goal": (100, 0, 80, 127, 127, -128),
-	"car_head": (0, 100, -6, -128, -128, -15),
-	"car_tail": (42, 47, 127, -43, -9, 127),
-	"road": (0, 51, 42, 127, -128, 127),
-	"bomb": (0, 100, 27, 127, 127, -39),
+	"box": (0, 100, -53, 127, 127, 49),
+	"goal": (100, 42, 82, 127, -55, -128),
+	"car_head": (0, 100, -12, -128, -128, -13),
+	"car_tail": (63, 40, -128, -38, 127, -128),
+	"road": (0, 100, -128, 127, -128, -78),
+	"bomb": (0, 100, 26, 127, 127, -38),
 }
 ROAD_PIXELS_THRESHOLD = 19
 ROAD_AREA_THRESHOLD = 19
@@ -226,7 +226,7 @@ while True:
 	clock.tick()
 	frame_id += 1
 	img = sensor.snapshot()
-	img.draw_rectangle(active_map_roi, color=(0,255,0))
+	img.draw_rectangle(active_map_roi, color=(0,0,0))
 	if car_debug == True:
 		blobs = img.find_blobs(CAR_THRESHOLDS,roi=active_map_roi,area_threshold=5, pixels_threshold=5, merge=True)
 		if blobs:
