@@ -35,8 +35,8 @@ typedef enum
     MISSION_WAIT_SCAN_RESULT,
     MISSION_PLAN_LABELED_PUSH,
     MISSION_EXECUTE_PUSH,
-    MISSION_WAIT_PUSH_SETTLE,
-    MISSION_WAIT_PUSH_MAP,
+    MISSION_WAIT_BLAST_MAP,
+    MISSION_WAIT_MAP_CLEAR,
     MISSION_PLAN_NORMAL_RETURN_ENTRY,
     MISSION_EXECUTE_NORMAL_RETURN_ENTRY,
     MISSION_NORMAL_RETURN_PHYSICAL_START,
@@ -64,16 +64,6 @@ typedef enum
     MISSION_FATAL_EMERGENCY_STOP
 } mission_fatal_fault_t;
 
-typedef enum
-{
-    MISSION_RECOVERY_NONE = 0,
-    MISSION_RECOVERY_EXACT,
-    MISSION_RECOVERY_PLAYER,
-    MISSION_RECOVERY_BOX,
-    MISSION_RECOVERY_ACTUAL_MAP,
-    MISSION_RECOVERY_REJECTED
-} mission_recovery_status_t;
-
 void mission_controller_init(void);
 void mission_controller_process(void);
 void mission_controller_update_10ms(void);
@@ -89,10 +79,6 @@ mission_level_result_t mission_controller_get_last_level_result(void);
 mission_fatal_fault_t mission_controller_get_fatal_fault(void);
 uint16_t mission_controller_get_abort_hold_remaining_10ms(void);
 uint8_t mission_controller_get_map_stable_frames(void);
-uint16_t mission_controller_get_push_checkpoint_index(void);
-uint16_t mission_controller_get_push_checkpoint_total(void);
-uint8_t mission_controller_get_recovery_count(void);
-mission_recovery_status_t mission_controller_get_recovery_status(void);
 uint8_t mission_controller_should_stop(void);
 const sokoban_inspection_event_t *mission_controller_get_pending_inspection(void);
 void mission_turn_process(void);
