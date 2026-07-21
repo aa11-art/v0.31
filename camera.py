@@ -5,7 +5,7 @@ GRID_COLS = 16
 GRID_ROWS = 12
 FRAME_W = 320
 FRAME_H = 240
-MAP_ROI = (44, 39, 218, 155)
+MAP_ROI = (38, 40, 238, 171)
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -25,11 +25,11 @@ DEBUG_DRAW_GRID = False
 DEBUG_PRINT_STATUS = False
 car_debug = False
 DEBUG_PRINT_EVERY_N_FRAMES = 10
-DEBUG_PRINT_GRID = True
+DEBUG_PRINT_GRID = False
 ENABLE_UART = True
 UART_ID = 12
 UART_BAUD = 115200
-FIXED_EXPOSURE_US = 326
+FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
     "box": (0, 100, -53, 127, 127, 49),
@@ -211,8 +211,10 @@ try:
     sensor.set_brightness(CAMERA_BRIGHTNESS)
 except Exception:
     pass
-sensor.set_auto_gain(False)
+sensor.skip_frames(time=1000)
+sensor.set_auto_gain(False, gain_db=0)
 sensor.set_auto_whitebal(False)
+sensor.skip_frames(time=200)
 sensor.set_auto_exposure(False, exposure_us=FIXED_EXPOSURE_US)
 sensor.skip_frames(time=500)
 clock = time.clock()
@@ -226,7 +228,6 @@ while True:
     clock.tick()
     frame_id += 1
     img = sensor.snapshot()
-    img.draw_rectangle(active_map_roi, color=(0,0,0))
     if car_debug == True:
         blobs = img.find_blobs(CAR_THRESHOLDS,roi=active_map_roi,area_threshold=5, pixels_threshold=5, merge=True)
         if blobs:
@@ -242,6 +243,7 @@ while True:
     print_status(frame_id, clock.fps(), car_cell, runtime_exposure_us)
     if ENABLE_UART and uart is not None:
         send_uart(uart, grid, car_cell)
+    img.draw_rectangle(active_map_roi, color=(0,0,0))
     draw_grid(img, MAP_ROI)
     if DEBUG_PRINT_GRID:
         for row in grid:
