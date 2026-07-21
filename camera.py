@@ -5,7 +5,7 @@ GRID_COLS = 16
 GRID_ROWS = 12
 FRAME_W = 320
 FRAME_H = 240
-MAP_ROI = (36, 54, 240, 174)
+MAP_ROI = (36, 21, 240, 174)
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -29,7 +29,7 @@ DEBUG_PRINT_GRID = True
 ENABLE_UART = True
 UART_ID = 12
 UART_BAUD = 115200
-FIXED_EXPOSURE_US = 140
+FIXED_EXPOSURE_US = 326
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
 	"box": (47, 100, -44, 127, 127, -8),
@@ -76,6 +76,13 @@ def clamp(value, min_value, max_value):
 	return value
 def create_grid(default_state):
 	return [[default_state for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+def inner_map_roi(map_roi):
+	rx, ry, rw, rh = map_roi
+	x0 = int(rx + rw / GRID_COLS + 0.5)
+	y0 = int(ry + rh / GRID_ROWS + 0.5)
+	x1 = int(rx + rw * (GRID_COLS - 1) / GRID_COLS + 0.5)
+	y1 = int(ry + rh * (GRID_ROWS - 1) / GRID_ROWS + 0.5)
+	return (x0, y0, x1 - x0, y1 - y0)
 def draw_grid(img, map_roi):
 	if not DEBUG_DRAW_GRID:
 		return
@@ -86,8 +93,8 @@ def draw_grid(img, map_roi):
 	if inner_size < 2:
 		inner_size = 2
 	half = inner_size // 2
-	for row in range(GRID_ROWS):
-		for col in range(GRID_COLS):
+	for row in range(1, GRID_ROWS - 1):
+		for col in range(1, GRID_COLS - 1):
 			cx = int(rx + (col + 0.5) * cell_w)
 			cy = int(ry + (row + 0.5) * cell_h)
 			x0 = clamp(cx - half, 0, FRAME_W - 1)
@@ -118,8 +125,8 @@ def build_grid(img, map_roi):
 	if inner_size < 2:
 		inner_size = 2
 	half = inner_size // 2
-	for row in range(GRID_ROWS):
-		for col in range(GRID_COLS):
+	for row in range(1, GRID_ROWS - 1):
+		for col in range(1, GRID_COLS - 1):
 			cx = int(rx + (col + 0.5) * cell_w)
 			cy = int(ry + (row + 0.5) * cell_h)
 			x0 = clamp(cx - half, 0, FRAME_W - 1)
@@ -148,7 +155,7 @@ def find_largest_blob(blobs):
 def find_car_blob(img, map_roi):
 	cars = img.find_blobs(
 		CAR_THRESHOLDS,
-		roi=map_roi,
+		roi=inner_map_roi(map_roi),
 		pixels_threshold=CAR_PIXELS_THRESHOLD,
 		area_threshold=CAR_AREA_THRESHOLD,
 		merge=True,
@@ -166,6 +173,9 @@ def car_cell_from_blob(car_blob, map_roi):
 	cell_h = rh / GRID_ROWS
 	col = clamp(int((cx - rx) / cell_w), 0, GRID_COLS - 1)
 	row = clamp(int((cy - ry) / cell_h), 0, GRID_ROWS - 1)
+	if (row == 0 or row == GRID_ROWS - 1 or
+		col == 0 or col == GRID_COLS - 1):
+		return None
 	return (row, col)
 def flatten_grid(grid):
 	out = []
@@ -211,13 +221,14 @@ if ENABLE_UART:
 	uart = UART(UART_ID, baudrate=UART_BAUD)
 frame_id = 0
 runtime_exposure_us = sensor.get_exposure_us()
+active_map_roi = inner_map_roi(MAP_ROI)
 while True:
 	clock.tick()
 	frame_id += 1
 	img = sensor.snapshot()
-	img.draw_rectangle(MAP_ROI, color=(0,255,0))
+	img.draw_rectangle(active_map_roi, color=(0,255,0))
 	if car_debug == True:
-		blobs = img.find_blobs(CAR_THRESHOLDS,roi=MAP_ROI,area_threshold=5, pixels_threshold=5, merge=True)
+		blobs = img.find_blobs(CAR_THRESHOLDS,roi=active_map_roi,area_threshold=5, pixels_threshold=5, merge=True)
 		if blobs:
 			for blob in blobs:
 				print(blob.cx()," ",blob.cy())
