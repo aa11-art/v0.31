@@ -469,7 +469,7 @@ void mission_controller_process(void)
 
         case MISSION_LEVEL_CHANGE:
             mission_reset_map_acquisition();
-            if(mission_start_one_move('R', 24.0f))
+            if(mission_start_one_move('U', 24.0f))
             {
                 s_timer_running = 1u;
                 mission_set_state(MISSION_LEAVE_START_ZONE);
@@ -770,7 +770,7 @@ void mission_controller_process(void)
         case MISSION_ABORT_RETURN_PHYSICAL_START:
             if(s_segment_running == 0u)
             {
-                if(mission_start_one_move('L', s_entry_distance))
+                if(mission_start_one_move('D', s_entry_distance))
                 {
                     s_segment_running = 1u;
                 }

@@ -28,5 +28,7 @@ float path_executor_get_position_x(void);
 float path_executor_get_position_y(void);
 float path_executor_get_target_x(void);
 float path_executor_get_target_y(void);
+float path_executor_get_carry_x(void);
+float path_executor_get_carry_y(void);
 
 #endif
