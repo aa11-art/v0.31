@@ -3,6 +3,15 @@
 
 #include "sokoban_solver.h"
 
+typedef enum
+{
+    PATH_EXECUTOR_FAULT_NONE = 0,
+    PATH_EXECUTOR_FAULT_INVALID_MOVE,
+    PATH_EXECUTOR_FAULT_RUN_TIMEOUT,
+    PATH_EXECUTOR_FAULT_STOP_TIMEOUT,
+    PATH_EXECUTOR_FAULT_YAW_TIMEOUT
+} path_executor_fault_reason_t;
+
 void path_executor_init(void);
 void path_executor_abort(void);
 uint8_t path_executor_start(const sokoban_solution_t *solution);
@@ -20,6 +29,7 @@ uint8_t path_executor_is_done(void);
 uint8_t path_executor_is_fault(void);
 uint8_t path_executor_is_running(void);
 uint8_t path_executor_get_state(void);
+path_executor_fault_reason_t path_executor_get_fault_reason(void);
 uint16_t path_executor_get_step_index(void);
 uint16_t path_executor_get_move_count(void);
 void path_executor_set_heading(sokoban_direction_t heading);

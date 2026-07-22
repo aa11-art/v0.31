@@ -10,8 +10,10 @@
 #define PATH_EXECUTOR_CROSS_AXIS_TOL (0.5f)       // 非运动轴完成容差
 #define PATH_EXECUTOR_COMPLETE_TICKS (8.0f)         // 连续到位 ticks 数
 #define PATH_EXECUTOR_SETTLE_TICKS   (5u)         // 稳定 ticks 数
-#define PATH_EXECUTOR_SETTLE_SPEED   (2.0f)       // 四轮停稳速度阈值
-#define PATH_EXECUTOR_SETTLE_TIMEOUT (50u)        // 停稳最长等待（500 ms）
+#define PATH_EXECUTOR_SETTLE_SPEED   (2.0f)       // 车体停稳速度阈值
+#define PATH_EXECUTOR_SETTLE_YAW     (2.0f)       // 停稳航向误差
+#define PATH_EXECUTOR_SETTLE_RATE    (3.0f)       // 停稳角速度
+#define PATH_EXECUTOR_SETTLE_TIMEOUT (100u)       // 停稳最长等待（1000 ms）
 #define PATH_EXECUTOR_TIMEOUT_TICKS  (500u)       // 单步超时（5 秒）
 
 
@@ -37,6 +39,8 @@ typedef enum
 static float s_carry_error_x = 0.0f;
 static float s_carry_error_y = 0.0f;
 static volatile uint8_t s_settle_elapsed_ticks = 0u;
+static volatile path_executor_fault_reason_t s_fault_reason =
+    PATH_EXECUTOR_FAULT_NONE;
 
 // 静态变量声明
 static volatile path_executor_state_t s_state = PATH_EXECUTOR_IDLE;  // 当前状态
@@ -64,11 +68,12 @@ static void path_executor_stop_motion(void)
     target_vy = 0.0f;
 }
 
-static void path_executor_enter_fault(void)
+static void path_executor_enter_fault(path_executor_fault_reason_t reason)
 {
     s_carry_error_x = 0.0f;
     s_carry_error_y = 0.0f;
     s_step_cell_count = 1u;
+    s_fault_reason = reason;
     path_executor_stop_motion();
     MecanumSpeedPidReset();
     s_state = PATH_EXECUTOR_FAULT;
@@ -83,16 +88,27 @@ static float path_executor_measure_vx(void)
 // 测量Y轴速度
 static float path_executor_measure_vy(void)
 {
-    return MecanumCalibrateBodyVy(
-        (float)(-encoder_fl + encoder_fr + encoder_bl - encoder_br) / 4.0f);
+    return
+        (float)(-encoder_fl + encoder_fr + encoder_bl - encoder_br) / 4.0f;
 }
 
-static uint8_t path_executor_wheels_stopped(void)
+static float path_executor_get_yaw_error(void)
 {
-    return (uint8_t)((fabsf((float)encoder_fl) <= PATH_EXECUTOR_SETTLE_SPEED) &&
-                     (fabsf((float)encoder_fr) <= PATH_EXECUTOR_SETTLE_SPEED) &&
-                     (fabsf((float)encoder_bl) <= PATH_EXECUTOR_SETTLE_SPEED) &&
-                     (fabsf((float)encoder_br) <= PATH_EXECUTOR_SETTLE_SPEED));
+    float error = target_yaw - yaw;
+
+    if(error > 180.0f) error -= 360.0f;
+    if(error < -180.0f) error += 360.0f;
+    return error;
+}
+
+static uint8_t path_executor_body_settled(float measured_vx,
+                                           float measured_vy,
+                                           float yaw_error)
+{
+    return (uint8_t)((fabsf(measured_vx) <= PATH_EXECUTOR_SETTLE_SPEED) &&
+                     (fabsf(measured_vy) <= PATH_EXECUTOR_SETTLE_SPEED) &&
+                     (fabsf(yaw_error) <= PATH_EXECUTOR_SETTLE_YAW) &&
+                     (fabsf(Gyro.x) <= PATH_EXECUTOR_SETTLE_RATE));
 }
 
 static uint8_t path_executor_within_tolerance(float error_x,
@@ -184,6 +200,7 @@ void path_executor_init(void)
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
     s_settle_elapsed_ticks = 0u;
+    s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     s_step_axis = PATH_AXIS_VX;
     s_state = PATH_EXECUTOR_IDLE;
     s_heading = SOKOBAN_DIR_UP;
@@ -209,6 +226,7 @@ void path_executor_abort(void)
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
     s_settle_elapsed_ticks = 0u;
+    s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     path_executor_stop_motion();
     MecanumSpeedPidReset();
     __enable_irq();
@@ -253,9 +271,10 @@ uint8_t path_executor_start_body_step_with_distance_and_tolerance(
     s_step_cell_count = 1u;
     s_step_distance = step_distance;
     s_step_complete_tolerance = complete_tolerance;
+    s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     if(path_executor_prepare_body_step(direction) == 0u)
     {
-        path_executor_enter_fault();
+        path_executor_enter_fault(PATH_EXECUTOR_FAULT_INVALID_MOVE);
         __enable_irq();
         return 0u;
     }
@@ -303,6 +322,7 @@ static uint8_t path_executor_start_internal(const sokoban_solution_t *solution,
     s_complete_ticks = 0u;
     s_settle_ticks = 0u;
     s_settle_elapsed_ticks = 0u;
+    s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     s_step_axis = PATH_AXIS_VX;
     s_state = PATH_EXECUTOR_LOAD_STEP;
     path_executor_stop_motion();
@@ -326,6 +346,9 @@ void path_executor_update_10ms(void)
 {
     float error_x;
     float error_y;
+    float measured_vx;
+    float measured_vy;
+    float yaw_error;
     uint8_t within_tolerance_x;
     uint8_t within_tolerance_y;
     uint8_t within_tolerance;
@@ -361,7 +384,7 @@ void path_executor_update_10ms(void)
 
             if(!path_executor_prepare_step(move))
             {
-                path_executor_enter_fault();
+                path_executor_enter_fault(PATH_EXECUTOR_FAULT_INVALID_MOVE);
                 break;
             }
 
@@ -407,7 +430,7 @@ void path_executor_update_10ms(void)
             else if(s_step_elapsed_ticks >=
                     (uint32_t)PATH_EXECUTOR_TIMEOUT_TICKS * s_step_cell_count)
             {
-                path_executor_enter_fault();
+                path_executor_enter_fault(PATH_EXECUTOR_FAULT_RUN_TIMEOUT);
             }
             break;
         }
@@ -415,11 +438,14 @@ void path_executor_update_10ms(void)
         case PATH_EXECUTOR_SETTLE:  // 稳定状态
         {
             path_executor_stop_motion();
-            s_step_position_x += path_executor_measure_vx() * PATH_EXECUTOR_DT_S;
-            s_step_position_y += path_executor_measure_vy() * PATH_EXECUTOR_DT_S;
+            measured_vx = path_executor_measure_vx();
+            measured_vy = path_executor_measure_vy();
+            yaw_error = path_executor_get_yaw_error();
+            s_step_position_x += measured_vx * PATH_EXECUTOR_DT_S;
+            s_step_position_y += measured_vy * PATH_EXECUTOR_DT_S;
             s_settle_elapsed_ticks++;
 
-            if(path_executor_wheels_stopped())
+            if(path_executor_body_settled(measured_vx, measured_vy, yaw_error))
             {
                 s_settle_ticks++;
             }
@@ -460,14 +486,22 @@ void path_executor_update_10ms(void)
             }
             else if(s_settle_elapsed_ticks >= PATH_EXECUTOR_SETTLE_TIMEOUT)
             {
-                path_executor_enter_fault();
+                if((fabsf(yaw_error) > PATH_EXECUTOR_SETTLE_YAW) ||
+                   (fabsf(Gyro.x) > PATH_EXECUTOR_SETTLE_RATE))
+                {
+                    path_executor_enter_fault(PATH_EXECUTOR_FAULT_YAW_TIMEOUT);
+                }
+                else
+                {
+                    path_executor_enter_fault(PATH_EXECUTOR_FAULT_STOP_TIMEOUT);
+                }
             }
             break;
         }
 
         default:  // 默认情况，设为故障
         {
-            path_executor_enter_fault();
+            path_executor_enter_fault(PATH_EXECUTOR_FAULT_INVALID_MOVE);
             break;
         }
     }
@@ -538,6 +572,11 @@ float path_executor_get_last_step_distance(void)
 uint8_t path_executor_get_state(void)
 {
     return (uint8_t)s_state;
+}
+
+path_executor_fault_reason_t path_executor_get_fault_reason(void)
+{
+    return s_fault_reason;
 }
 
 uint16_t path_executor_get_step_index(void)
