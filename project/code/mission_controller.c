@@ -22,6 +22,35 @@ extern volatile uint32_t camera_frame_sequence;
 #define MISSION_MAP_STABLE_FRAMES            (3u)
 #define MISSION_BLAST_STABLE_FRAMES          (2u)
 #define MISSION_STILL_ENCODER_LIMIT          (2)
+#define VISION_POSE_TIMEOUT_10MS             (80u)
+#define VISION_POSE_SAMPLE_COUNT             (5u)
+#define VISION_POSE_MIN_CONFIDENCE           (60u)
+#define VISION_POSE_MAX_SPREAD_CELL          (0.12f)
+#define VISION_POSE_MAX_GYRO_RATE            (3.0f)
+#define VISION_CORRECTION_DEADBAND_CELL      (0.08f)
+#define VISION_CORRECTION_FINAL_CELL         (0.10f)
+#define VISION_CORRECTION_MAX_ERROR_CELL     (0.35f)
+#define VISION_CORRECTION_MAX_STEP_CELL      (0.25f)
+#define VISION_CORRECTION_MAX_ATTEMPTS       (3u)
+#define VISION_CORRECTION_CELL_DISTANCE      (24.0f)
+#define VISION_CORRECTION_PATH_TOLERANCE     (0.5f)
+
+typedef enum
+{
+    MISSION_PUSH_IDLE = 0,
+    MISSION_PUSH_PREPARE,
+    MISSION_PUSH_WAIT_WALK,
+    MISSION_PUSH_WAIT_POSE,
+    MISSION_PUSH_WAIT_CORRECTION,
+    MISSION_PUSH_WAIT_PUSH
+} mission_push_phase_t;
+
+typedef enum
+{
+    MISSION_PUSH_UPDATE_RUNNING = 0,
+    MISSION_PUSH_UPDATE_DONE,
+    MISSION_PUSH_UPDATE_FAULT
+} mission_push_update_result_t;
 
 static volatile mission_state_t s_state = MISSION_BOOT_DELAY;
 static volatile uint8_t s_timer_running = 0u;
@@ -52,6 +81,18 @@ static mission_fatal_fault_t s_fatal_fault = MISSION_FATAL_NONE;
 static sokoban_direction_t s_heading = SOKOBAN_DIR_UP;
 static sokoban_status_t s_last_status = SOKOBAN_STATUS_OK;
 static float s_entry_distance = 24.0f;
+static mission_push_phase_t s_push_phase = MISSION_PUSH_IDLE;
+static uint16_t s_push_cursor = 0u;
+static uint16_t s_push_range_end = 0u;
+static uint16_t s_push_segment_end = 0u;
+static uint8_t s_push_expected_row = 0u;
+static uint8_t s_push_expected_col = 0u;
+static uint8_t s_push_correction_attempts = 0u;
+static volatile uint16_t s_pose_wait_10ms = 0u;
+static uint32_t s_pose_last_sequence = 0u;
+static uint8_t s_pose_sample_count = 0u;
+static float s_pose_samples_x[VISION_POSE_SAMPLE_COUNT];
+static float s_pose_samples_y[VISION_POSE_SAMPLE_COUNT];
 
 static char s_current_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
 static char s_candidate_map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE];
@@ -81,6 +122,20 @@ static void mission_solution_reset(sokoban_solution_t *solution)
         solution->blast_rows[idx] = SOKOBAN_INVALID_CELL;
         solution->blast_cols[idx] = SOKOBAN_INVALID_CELL;
     }
+}
+
+static void mission_push_reset(void)
+{
+    s_push_phase = MISSION_PUSH_IDLE;
+    s_push_cursor = 0u;
+    s_push_range_end = 0u;
+    s_push_segment_end = 0u;
+    s_push_expected_row = 0u;
+    s_push_expected_col = 0u;
+    s_push_correction_attempts = 0u;
+    s_pose_wait_10ms = 0u;
+    s_pose_last_sequence = 0u;
+    s_pose_sample_count = 0u;
 }
 
 static uint8_t mission_encoder_is_still(void)
@@ -115,6 +170,7 @@ static void mission_reset_level_data(void)
     s_turn_complete = 0u;
     s_inspection_event = 0u;
     s_inspection_move_index = 0u;
+    mission_push_reset();
     label = 0u;
     (void)memset(&s_labels, 0, sizeof(s_labels));
     (void)memset(&s_inspection_plan, 0, sizeof(s_inspection_plan));
@@ -128,6 +184,7 @@ static void mission_enter_fatal(mission_fatal_fault_t fault,
     s_last_status = status;
     s_fatal_fault = fault;
     s_timer_running = 0u;
+    mission_push_reset();
     path_executor_abort();
     MecanumCarStop();
     mission_set_state(MISSION_FAULT);
@@ -258,9 +315,380 @@ static uint8_t mission_start_one_move(char move, float distance)
     return path_executor_start_with_distance(&s_segment_solution, distance);
 }
 
+static uint8_t mission_advance_expected_position(uint16_t begin,
+                                                 uint16_t end)
+{
+    uint16_t index;
+    int16_t row = s_push_expected_row;
+    int16_t col = s_push_expected_col;
+
+    for(index = begin; index < end; index++)
+    {
+        switch(s_task_solution.move_seq[index])
+        {
+            case 'U': row--; break;
+            case 'D': row++; break;
+            case 'L': col--; break;
+            case 'R': col++; break;
+            default: return 0u;
+        }
+        if((row < 0) || (row >= (int16_t)SOKOBAN_MAP_HEIGHT) ||
+           (col < 0) || (col >= (int16_t)SOKOBAN_MAP_WIDTH))
+        {
+            return 0u;
+        }
+    }
+
+    s_push_expected_row = (uint8_t)row;
+    s_push_expected_col = (uint8_t)col;
+    return 1u;
+}
+
+static uint16_t mission_find_next_push(uint16_t begin, uint16_t end)
+{
+    uint16_t index;
+    for(index = begin; index < end; index++)
+    {
+        if(sokoban_solution_move_is_push(&s_task_solution, index))
+        {
+            return index;
+        }
+    }
+    return end;
+}
+
+static uint8_t mission_push_flags_valid(void)
+{
+    uint16_t index;
+    uint16_t count = 0u;
+    for(index = 0u; index < s_task_solution.move_count; index++)
+    {
+        if(sokoban_solution_move_is_push(&s_task_solution, index))
+        {
+            count++;
+        }
+    }
+    return (uint8_t)(count == s_task_solution.push_count);
+}
+
+static void mission_begin_pose_wait(uint8_t reset_attempts)
+{
+    camera_pose_snapshot_t pose;
+    if(reset_attempts != 0u)
+    {
+        s_push_correction_attempts = 0u;
+    }
+    s_pose_wait_10ms = 0u;
+    s_pose_sample_count = 0u;
+    s_pose_last_sequence = 0u;
+    if(camera_sokoban_copy_latest_pose(&pose))
+    {
+        s_pose_last_sequence = pose.sequence;
+    }
+    MecanumCarStop();
+    s_push_phase = MISSION_PUSH_WAIT_POSE;
+}
+
+static float mission_median_five(float values[VISION_POSE_SAMPLE_COUNT])
+{
+    uint8_t outer;
+    for(outer = 1u; outer < VISION_POSE_SAMPLE_COUNT; outer++)
+    {
+        float value = values[outer];
+        uint8_t inner = outer;
+        while((inner > 0u) && (values[inner - 1u] > value))
+        {
+            values[inner] = values[inner - 1u];
+            inner--;
+        }
+        values[inner] = value;
+    }
+    return values[VISION_POSE_SAMPLE_COUNT / 2u];
+}
+
+static uint8_t mission_collect_stable_pose(float *pose_x, float *pose_y)
+{
+    camera_pose_snapshot_t pose;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+    uint8_t index;
+
+    if((mission_encoder_is_still() == 0u) ||
+       (fabsf(Gyro.x) > VISION_POSE_MAX_GYRO_RATE))
+    {
+        s_pose_sample_count = 0u;
+        return 0u;
+    }
+    if(!camera_sokoban_copy_latest_pose(&pose) ||
+       (pose.sequence == s_pose_last_sequence))
+    {
+        return 0u;
+    }
+    s_pose_last_sequence = pose.sequence;
+
+    if((pose.valid == 0u) ||
+       (pose.confidence < VISION_POSE_MIN_CONFIDENCE))
+    {
+        s_pose_sample_count = 0u;
+        return 0u;
+    }
+
+    s_pose_samples_x[s_pose_sample_count] = (float)pose.x100 / 100.0f;
+    s_pose_samples_y[s_pose_sample_count] = (float)pose.y100 / 100.0f;
+    s_pose_sample_count++;
+    if(s_pose_sample_count < VISION_POSE_SAMPLE_COUNT)
+    {
+        return 0u;
+    }
+
+    min_x = max_x = s_pose_samples_x[0];
+    min_y = max_y = s_pose_samples_y[0];
+    for(index = 1u; index < VISION_POSE_SAMPLE_COUNT; index++)
+    {
+        if(s_pose_samples_x[index] < min_x) min_x = s_pose_samples_x[index];
+        if(s_pose_samples_x[index] > max_x) max_x = s_pose_samples_x[index];
+        if(s_pose_samples_y[index] < min_y) min_y = s_pose_samples_y[index];
+        if(s_pose_samples_y[index] > max_y) max_y = s_pose_samples_y[index];
+    }
+    if(((max_x - min_x) > VISION_POSE_MAX_SPREAD_CELL) ||
+       ((max_y - min_y) > VISION_POSE_MAX_SPREAD_CELL))
+    {
+        s_pose_sample_count = 0u;
+        return 0u;
+    }
+
+    *pose_x = mission_median_five(s_pose_samples_x);
+    *pose_y = mission_median_five(s_pose_samples_y);
+    return 1u;
+}
+
+static uint8_t mission_start_push_segment(uint16_t begin,
+                                          uint16_t end,
+                                          mission_push_phase_t wait_phase)
+{
+    if((begin >= end) || !mission_start_segment(&s_task_solution, begin, end))
+    {
+        return 0u;
+    }
+    s_push_segment_end = end;
+    s_push_phase = wait_phase;
+    return 1u;
+}
+
+static uint8_t mission_begin_push_range(uint16_t begin,
+                                        uint16_t end,
+                                        uint8_t start_row,
+                                        uint8_t start_col)
+{
+    if((begin > end) || (end > s_task_solution.move_count) ||
+       (start_row >= SOKOBAN_MAP_HEIGHT) ||
+       (start_col >= SOKOBAN_MAP_WIDTH) ||
+       !mission_push_flags_valid())
+    {
+        return 0u;
+    }
+    s_push_cursor = begin;
+    s_push_range_end = end;
+    s_push_segment_end = begin;
+    s_push_expected_row = start_row;
+    s_push_expected_col = start_col;
+    s_push_correction_attempts = 0u;
+    s_push_phase = MISSION_PUSH_PREPARE;
+    return 1u;
+}
+
+static uint8_t mission_continue_push_range(uint16_t begin, uint16_t end)
+{
+    if((begin != s_push_cursor) || (begin > end) ||
+       (end > s_task_solution.move_count))
+    {
+        return 0u;
+    }
+    s_push_range_end = end;
+    s_push_phase = MISSION_PUSH_PREPARE;
+    return 1u;
+}
+
+static uint8_t mission_start_visual_correction(float error,
+                                               uint8_t x_axis)
+{
+    float distance_cell = fabsf(error);
+    sokoban_direction_t world_direction;
+    sokoban_body_direction_t body_direction;
+
+    if(distance_cell > VISION_CORRECTION_MAX_STEP_CELL)
+    {
+        distance_cell = VISION_CORRECTION_MAX_STEP_CELL;
+    }
+    if(x_axis != 0u)
+    {
+        world_direction = (error > 0.0f) ? SOKOBAN_DIR_RIGHT :
+                                           SOKOBAN_DIR_LEFT;
+    }
+    else
+    {
+        world_direction = (error > 0.0f) ? SOKOBAN_DIR_DOWN :
+                                           SOKOBAN_DIR_UP;
+    }
+    body_direction = sokoban_world_to_body(s_heading, world_direction);
+    if(!path_executor_start_body_step_with_distance_and_tolerance(
+           body_direction,
+           distance_cell * VISION_CORRECTION_CELL_DISTANCE,
+           VISION_CORRECTION_PATH_TOLERANCE))
+    {
+        return 0u;
+    }
+    s_push_correction_attempts++;
+    s_push_phase = MISSION_PUSH_WAIT_CORRECTION;
+    return 1u;
+}
+
+static mission_push_update_result_t mission_update_push_range(void)
+{
+    float pose_x;
+    float pose_y;
+    float error_x;
+    float error_y;
+    float lateral_error;
+    float longitudinal_error;
+    uint8_t lateral_is_x;
+
+    switch(s_push_phase)
+    {
+        case MISSION_PUSH_PREPARE:
+        {
+            uint16_t push_index;
+            if(s_push_cursor >= s_push_range_end)
+            {
+                s_push_phase = MISSION_PUSH_IDLE;
+                return MISSION_PUSH_UPDATE_DONE;
+            }
+            push_index = mission_find_next_push(s_push_cursor,
+                                                s_push_range_end);
+            if(push_index > s_push_cursor)
+            {
+                if(!mission_start_push_segment(s_push_cursor, push_index,
+                                               MISSION_PUSH_WAIT_WALK))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+            }
+            else if(push_index == s_push_cursor)
+            {
+                mission_begin_pose_wait(1u);
+            }
+            else
+            {
+                return MISSION_PUSH_UPDATE_FAULT;
+            }
+        } break;
+
+        case MISSION_PUSH_WAIT_WALK:
+            if(path_executor_is_done())
+            {
+                if(!mission_advance_expected_position(s_push_cursor,
+                                                      s_push_segment_end))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+                s_push_cursor = s_push_segment_end;
+                s_push_phase = MISSION_PUSH_PREPARE;
+            }
+            break;
+
+        case MISSION_PUSH_WAIT_POSE:
+            if(mission_collect_stable_pose(&pose_x, &pose_y))
+            {
+                char push_move = s_task_solution.move_seq[s_push_cursor];
+                error_x = (float)s_push_expected_col - pose_x;
+                error_y = (float)s_push_expected_row - pose_y;
+                if((fabsf(error_x) > VISION_CORRECTION_MAX_ERROR_CELL) ||
+                   (fabsf(error_y) > VISION_CORRECTION_MAX_ERROR_CELL))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+                if(((fabsf(error_x) <= VISION_CORRECTION_DEADBAND_CELL) &&
+                    (fabsf(error_y) <= VISION_CORRECTION_DEADBAND_CELL)) ||
+                   ((s_push_correction_attempts >= VISION_CORRECTION_MAX_ATTEMPTS) &&
+                    (fabsf(error_x) <= VISION_CORRECTION_FINAL_CELL) &&
+                    (fabsf(error_y) <= VISION_CORRECTION_FINAL_CELL)))
+                {
+                    if(!mission_start_push_segment(s_push_cursor,
+                                                   (uint16_t)(s_push_cursor + 1u),
+                                                   MISSION_PUSH_WAIT_PUSH))
+                    {
+                        return MISSION_PUSH_UPDATE_FAULT;
+                    }
+                    break;
+                }
+                if(s_push_correction_attempts >= VISION_CORRECTION_MAX_ATTEMPTS)
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+
+                lateral_is_x = (uint8_t)((push_move == 'U') ||
+                                         (push_move == 'D'));
+                lateral_error = lateral_is_x ? error_x : error_y;
+                longitudinal_error = lateral_is_x ? error_y : error_x;
+                if(fabsf(lateral_error) > VISION_CORRECTION_DEADBAND_CELL)
+                {
+                    if(!mission_start_visual_correction(lateral_error,
+                                                        lateral_is_x))
+                    {
+                        return MISSION_PUSH_UPDATE_FAULT;
+                    }
+                }
+                else if(!mission_start_visual_correction(
+                            longitudinal_error,
+                            (uint8_t)!lateral_is_x))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+            }
+            else if(s_pose_wait_10ms >= VISION_POSE_TIMEOUT_10MS)
+            {
+                if(!mission_start_push_segment(s_push_cursor,
+                                               (uint16_t)(s_push_cursor + 1u),
+                                               MISSION_PUSH_WAIT_PUSH))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+            }
+            break;
+
+        case MISSION_PUSH_WAIT_CORRECTION:
+            if(path_executor_is_done())
+            {
+                mission_begin_pose_wait(0u);
+            }
+            break;
+
+        case MISSION_PUSH_WAIT_PUSH:
+            if(path_executor_is_done())
+            {
+                if(!mission_advance_expected_position(s_push_cursor,
+                                                      s_push_segment_end))
+                {
+                    return MISSION_PUSH_UPDATE_FAULT;
+                }
+                s_push_cursor = s_push_segment_end;
+                s_push_phase = MISSION_PUSH_PREPARE;
+            }
+            break;
+
+        default:
+            return MISSION_PUSH_UPDATE_FAULT;
+    }
+
+    return MISSION_PUSH_UPDATE_RUNNING;
+}
+
 static void mission_start_return(void)
 {
     s_segment_running = 0u;
+    mission_push_reset();
     if(s_have_valid_map != 0u)
     {
         mission_set_state((s_level_result == MISSION_LEVEL_RESULT_ABORTED) ?
@@ -281,6 +709,7 @@ static void mission_abort_level(sokoban_status_t status)
        (s_level_result == MISSION_LEVEL_RESULT_ABORTED)) return;
     s_last_status = status;
     s_level_result = MISSION_LEVEL_RESULT_ABORTED;
+    mission_push_reset();
     path_executor_abort();
     MecanumCarStop();
     mission_start_return();
@@ -427,6 +856,12 @@ void mission_controller_update_10ms(void)
 {
     s_state_elapsed_10ms++;
     if(s_timer_running != 0u) s_elapsed_10ms++;
+    if((s_state == MISSION_EXECUTE_PUSH) &&
+       (s_push_phase == MISSION_PUSH_WAIT_POSE) &&
+       (s_pose_wait_10ms < VISION_POSE_TIMEOUT_10MS))
+    {
+        s_pose_wait_10ms++;
+    }
     if(s_state == MISSION_ABORT_HOLD)
     {
         if(mission_encoder_is_still() != 0u)
@@ -512,7 +947,10 @@ void mission_controller_process(void)
             {
                 mission_abort_level(s_last_status);
             }
-            else if(path_executor_start(&s_task_solution))
+            else if(mission_begin_push_range(0u,
+                                             s_task_solution.move_count,
+                                             s_entry_row,
+                                             s_entry_col))
             {
                 s_segment_running = 1u;
                 mission_set_state(MISSION_EXECUTE_PUSH);
@@ -625,7 +1063,10 @@ void mission_controller_process(void)
                 {
                     mission_set_state(MISSION_WAIT_MAP_CLEAR);
                 }
-                else if(mission_start_segment(&s_task_solution, 0u, end))
+                else if(mission_begin_push_range(
+                            0u, end,
+                            s_inspection_plan.final_row,
+                            s_inspection_plan.final_col))
                 {
                     s_segment_running = 1u;
                     mission_set_state(MISSION_EXECUTE_PUSH);
@@ -638,18 +1079,27 @@ void mission_controller_process(void)
             break;
 
         case MISSION_EXECUTE_PUSH:
-            if(path_executor_is_done())
             {
-                s_segment_running = 0u;
-                s_clear_frame_count = 0u;
-                if(s_blast_event_index < s_task_solution.blast_count)
+                mission_push_update_result_t push_result =
+                    mission_update_push_range();
+                if(push_result == MISSION_PUSH_UPDATE_FAULT)
                 {
-                    s_blast_match_count = 0u;
-                    mission_set_state(MISSION_WAIT_BLAST_MAP);
+                    mission_enter_fatal(MISSION_FATAL_PATH,
+                                        SOKOBAN_STATUS_INVALID_MAP);
                 }
-                else
+                else if(push_result == MISSION_PUSH_UPDATE_DONE)
                 {
-                    mission_set_state(MISSION_WAIT_MAP_CLEAR);
+                    s_segment_running = 0u;
+                    s_clear_frame_count = 0u;
+                    if(s_blast_event_index < s_task_solution.blast_count)
+                    {
+                        s_blast_match_count = 0u;
+                        mission_set_state(MISSION_WAIT_BLAST_MAP);
+                    }
+                    else
+                    {
+                        mission_set_state(MISSION_WAIT_MAP_CLEAR);
+                    }
                 }
             }
             break;
@@ -684,7 +1134,7 @@ void mission_controller_process(void)
                 {
                     mission_set_state(MISSION_WAIT_MAP_CLEAR);
                 }
-                else if(mission_start_segment(&s_task_solution, begin, end))
+                else if(mission_continue_push_range(begin, end))
                 {
                     s_segment_running = 1u;
                     mission_set_state(MISSION_EXECUTE_PUSH);

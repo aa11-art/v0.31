@@ -4,7 +4,7 @@
 #include "zf_common_headfile.h"
 #include "sokoban_solver.h"
 
-#define POSITION_STEP_TEST_MODE (1u)
+#define POSITION_STEP_TEST_MODE (0u)
 #define GYRO_SPEED_TUNE_MODE    (0u)
 
 void sokoban_debug_once(void);

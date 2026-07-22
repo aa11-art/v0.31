@@ -187,6 +187,28 @@ static void sk_solution_reset(sokoban_solution_t *solution)
     }
 }
 
+static void sk_solution_set_push(sokoban_solution_t *solution,
+                                 uint16_t move_index)
+{
+    if((solution != 0) && (move_index < SOKOBAN_MAX_MOVES))
+    {
+        solution->push_flags[move_index >> 3u] |=
+            (uint8_t)(1u << (move_index & 7u));
+    }
+}
+
+uint8_t sokoban_solution_move_is_push(const sokoban_solution_t *solution,
+                                      uint16_t move_index)
+{
+    if((solution == 0) || (move_index >= solution->move_count) ||
+       (move_index >= SOKOBAN_MAX_MOVES))
+    {
+        return 0u;
+    }
+    return (uint8_t)((solution->push_flags[move_index >> 3u] >>
+                      (move_index & 7u)) & 1u);
+}
+
 /* Basic bitset helpers used by walls, goals and boxes. */
 static void sk_zero_bits(uint64_t bits[SK_BITSET_WORDS])
 {
@@ -499,7 +521,7 @@ static uint8_t sk_map_cell_walkable(const char map[SOKOBAN_MAP_HEIGHT][SOKOBAN_M
 
 static uint8_t sk_append_reconstructed_path(uint16_t start_state,
                                             uint16_t end_state,
-                                            char *out_moves,
+                                            sokoban_solution_t *solution,
                                             uint16_t *io_move_count,
                                             uint16_t *io_push_count)
 {
@@ -564,7 +586,11 @@ static uint8_t sk_append_reconstructed_path(uint16_t start_state,
         {
             current_push_count++;
         }
-        out_moves[current_count++] = s_single_reverse_buf[reverse_len];
+        if(s_single_reverse_push[reverse_len])
+        {
+            sk_solution_set_push(solution, current_count);
+        }
+        solution->move_seq[current_count++] = s_single_reverse_buf[reverse_len];
     }
 
     *io_move_count = current_count;
@@ -1279,7 +1305,7 @@ static sokoban_status_t sk_solve_single_box(uint8_t start_player,
                     uint16_t push_count = 0u;
                     if(!sk_append_reconstructed_path(start_state,
                                                      child_state,
-                                                     solution->move_seq,
+                                                     solution,
                                                      &move_count,
                                                      &push_count))
                     {
@@ -1398,7 +1424,7 @@ static sokoban_status_t sk_plan_walk_cells(const char map[SOKOBAN_MAP_HEIGHT][SO
                 uint16_t move_count = 0u;
                 if(!sk_append_reconstructed_path(start_state,
                                                  child_state,
-                                                 solution->move_seq,
+                                                 solution,
                                                  &move_count,
                                                  0))
                 {
@@ -1433,7 +1459,12 @@ static uint8_t sk_append_solution(sokoban_solution_t *dst, const sokoban_solutio
 
     for(idx = 0u; idx < src->move_count; idx++)
     {
-        dst->move_seq[dst->move_count + idx] = src->move_seq[idx];
+        uint16_t target_index = (uint16_t)(dst->move_count + idx);
+        dst->move_seq[target_index] = src->move_seq[idx];
+        if(sokoban_solution_move_is_push(src, idx))
+        {
+            sk_solution_set_push(dst, target_index);
+        }
     }
 
     dst->move_count = (uint16_t)(dst->move_count + src->move_count);
@@ -1611,6 +1642,7 @@ static sokoban_status_t sk_reconstruct(const sk_search_t *forward,
             return SOKOBAN_STATUS_PATH_OVERFLOW;
         }
 
+        sk_solution_set_push(solution, move_count);
         solution->move_seq[move_count++] = s_move_char[child->action_dir];
         push_count++;
         box_from = (uint8_t)s_neighbor[child->action_from][child->action_dir];
@@ -2680,6 +2712,7 @@ static sokoban_status_t sk_labeled_reconstruct(const sk_labeled_search_t *search
             solution->blast_cols[solution->blast_count] = (uint8_t)(blast_center % SOKOBAN_MAP_WIDTH);
             solution->blast_count++;
         }
+        sk_solution_set_push(solution, move_count);
         solution->move_seq[move_count++] = s_move_char[child->action_dir];
         push_count++;
         box_from = (uint8_t)s_neighbor[child->action_from][child->action_dir];

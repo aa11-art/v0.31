@@ -6,6 +6,9 @@ GRID_ROWS = 12
 FRAME_W = 320
 FRAME_H = 240
 MAP_ROI = (38, 40, 238, 171)
+# Outer map corners in TL, TR, BR, BL order. Replace these defaults with
+# measured image coordinates after the camera mount is fixed.
+MAP_CORNERS = ((38, 40), (275, 40), (275, 210), (38, 210))
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -29,6 +32,16 @@ DEBUG_PRINT_GRID = False
 ENABLE_UART = True
 UART_ID = 12
 UART_BAUD = 115200
+MAP_SEND_EVERY_N_FRAMES = 3
+POSE_VERSION = 1
+POSE_FLAG_VALID = 0x01
+POSE_INVALID_COORD = 0xFFFF
+POSE_HEAD = (0xA4, 0xB4)
+POSE_TAIL = 0xC4
+CAR_PAIR_MIN_DISTANCE = 0.15
+CAR_PAIR_MAX_DISTANCE = 1.20
+CAR_PAIR_AMBIGUITY_RATIO = 0.90
+CAR_MARKER_MAX_CELL_SIZE = 1.20
 FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
@@ -58,7 +71,6 @@ def normalize_lab_threshold(threshold):
 THRESHOLDS = {}
 for key in RAW_THRESHOLDS:
     THRESHOLDS[key] = normalize_lab_threshold(RAW_THRESHOLDS[key])
-CAR_THRESHOLDS = [THRESHOLDS["car_head"], THRESHOLDS["car_tail"]]
 GRID_THRESHOLD_RULES = (
     (STATE_BOMB, THRESHOLDS["bomb"], BOMB_PIXELS_THRESHOLD, BOMB_AREA_THRESHOLD),
     (STATE_BOX, THRESHOLDS["box"], BOX_PIXELS_THRESHOLD, BOX_AREA_THRESHOLD),
@@ -74,6 +86,56 @@ def clamp(value, min_value, max_value):
     if value > max_value:
         return max_value
     return value
+def solve_linear_system(matrix, values):
+    size = len(values)
+    augmented = []
+    for row in range(size):
+        augmented.append(list(matrix[row]) + [values[row]])
+    for column in range(size):
+        pivot = column
+        for row in range(column + 1, size):
+            if abs(augmented[row][column]) > abs(augmented[pivot][column]):
+                pivot = row
+        if abs(augmented[pivot][column]) < 0.000001:
+            raise ValueError("map corners do not define a homography")
+        if pivot != column:
+            augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+        divisor = augmented[column][column]
+        for index in range(column, size + 1):
+            augmented[column][index] /= divisor
+        for row in range(size):
+            if row == column:
+                continue
+            factor = augmented[row][column]
+            if factor == 0:
+                continue
+            for index in range(column, size + 1):
+                augmented[row][index] -= factor * augmented[column][index]
+    return [augmented[row][size] for row in range(size)]
+def build_map_homography(corners):
+    target = (
+        (-0.5, -0.5),
+        (GRID_COLS - 0.5, -0.5),
+        (GRID_COLS - 0.5, GRID_ROWS - 0.5),
+        (-0.5, GRID_ROWS - 0.5),
+    )
+    matrix = []
+    values = []
+    for index in range(4):
+        px, py = corners[index]
+        gx, gy = target[index]
+        matrix.append([px, py, 1.0, 0.0, 0.0, 0.0, -gx * px, -gx * py])
+        values.append(gx)
+        matrix.append([0.0, 0.0, 0.0, px, py, 1.0, -gy * px, -gy * py])
+        values.append(gy)
+    return solve_linear_system(matrix, values)
+def pixel_to_grid(px, py, homography):
+    denominator = homography[6] * px + homography[7] * py + 1.0
+    if abs(denominator) < 0.000001:
+        return None
+    grid_x = (homography[0] * px + homography[1] * py + homography[2]) / denominator
+    grid_y = (homography[3] * px + homography[4] * py + homography[5]) / denominator
+    return (grid_x, grid_y)
 def create_grid(default_state):
     return [[default_state for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 def inner_map_roi(map_roi):
@@ -143,38 +205,71 @@ def build_grid(img, map_roi):
             )
             grid[row][col] = classify_grid_blobs(blobs)
     return grid
-def find_largest_blob(blobs):
-    best_blob = None
-    best_pixels = -1
-    for blob in blobs:
-        pixels = blob.pixels()
-        if pixels > best_pixels:
-            best_pixels = pixels
-            best_blob = blob
-    return best_blob
-def find_car_blob(img, map_roi):
-    cars = img.find_blobs(
-        CAR_THRESHOLDS,
+def find_marker_candidates(img, threshold, map_roi):
+    candidates = []
+    cell_w = map_roi[2] / GRID_COLS
+    cell_h = map_roi[3] / GRID_ROWS
+    max_w = cell_w * CAR_MARKER_MAX_CELL_SIZE
+    max_h = cell_h * CAR_MARKER_MAX_CELL_SIZE
+    blobs = img.find_blobs(
+        [threshold],
         roi=inner_map_roi(map_roi),
         pixels_threshold=CAR_PIXELS_THRESHOLD,
         area_threshold=CAR_AREA_THRESHOLD,
-        merge=True,
+        merge=False,
     )
-    return find_largest_blob(cars)
-def car_cell_from_blob(car_blob, map_roi):
-    if car_blob is None:
+    for blob in blobs:
+        if blob.w() <= max_w and blob.h() <= max_h:
+            candidates.append(blob)
+    return candidates
+def find_car_pose(img, map_roi, homography):
+    head_candidates = find_marker_candidates(img, THRESHOLDS["car_head"], map_roi)
+    tail_candidates = find_marker_candidates(img, THRESHOLDS["car_tail"], map_roi)
+    min_distance_sq = CAR_PAIR_MIN_DISTANCE * CAR_PAIR_MIN_DISTANCE
+    max_distance_sq = CAR_PAIR_MAX_DISTANCE * CAR_PAIR_MAX_DISTANCE
+    best = None
+    best_score = -1
+    second_score = -1
+    for head in head_candidates:
+        head_grid = pixel_to_grid(head.cx(), head.cy(), homography)
+        if head_grid is None:
+            continue
+        for tail in tail_candidates:
+            tail_grid = pixel_to_grid(tail.cx(), tail.cy(), homography)
+            if tail_grid is None:
+                continue
+            dx = head_grid[0] - tail_grid[0]
+            dy = head_grid[1] - tail_grid[1]
+            distance_sq = dx * dx + dy * dy
+            if distance_sq < min_distance_sq or distance_sq > max_distance_sq:
+                continue
+            center_x = (head_grid[0] + tail_grid[0]) * 0.5
+            center_y = (head_grid[1] + tail_grid[1]) * 0.5
+            if (center_x < 0.5 or center_x > GRID_COLS - 1.5 or
+                center_y < 0.5 or center_y > GRID_ROWS - 1.5):
+                continue
+            score = head.pixels() + tail.pixels()
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best = (center_x, center_y, head, tail)
+            elif score > second_score:
+                second_score = score
+    if best is None:
         return None
-    rx, ry, rw, rh = map_roi
-    cx = car_blob.cx()
-    cy = car_blob.cy()
-    if cx < rx or cx >= rx + rw or cy < ry or cy >= ry + rh:
+    if second_score >= 0 and second_score >= best_score * CAR_PAIR_AMBIGUITY_RATIO:
         return None
-    cell_w = rw / GRID_COLS
-    cell_h = rh / GRID_ROWS
-    col = clamp(int((cx - rx) / cell_w), 0, GRID_COLS - 1)
-    row = clamp(int((cy - ry) / cell_h), 0, GRID_ROWS - 1)
-    if (row == 0 or row == GRID_ROWS - 1 or
-        col == 0 or col == GRID_COLS - 1):
+    if second_score < 0:
+        confidence = 100
+    else:
+        confidence = clamp(int(100 * (best_score - second_score) / best_score), 0, 100)
+    return (best[0], best[1], confidence, best[2], best[3])
+def car_cell_from_pose(car_pose):
+    if car_pose is None:
+        return None
+    col = int(car_pose[0] + 0.5)
+    row = int(car_pose[1] + 0.5)
+    if row <= 0 or row >= GRID_ROWS - 1 or col <= 0 or col >= GRID_COLS - 1:
         return None
     return (row, col)
 def flatten_grid(grid):
@@ -197,12 +292,50 @@ def send_uart(uart, grid, car_cell):
     uart.write(bytearray([0xA3, 0xB3]))
     uart.write(payload)
     uart.write(bytearray([0xC3]))
-def print_status(frame_id, fps, car_cell, exposure_us):
+def crc8_atm(data):
+    crc = 0
+    for value in data:
+        crc ^= value
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x07) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+def encode_pose_coord(value):
+    encoded = int(value * 100.0 + 0.5)
+    return clamp(encoded, 0, 0xFFFE)
+def send_pose_uart(uart, frame_id, car_pose):
+    valid = car_pose is not None
+    if valid:
+        x100 = encode_pose_coord(car_pose[0])
+        y100 = encode_pose_coord(car_pose[1])
+        confidence = car_pose[2]
+        flags = POSE_FLAG_VALID
+    else:
+        x100 = POSE_INVALID_COORD
+        y100 = POSE_INVALID_COORD
+        confidence = 0
+        flags = 0
+    payload = bytearray([
+        POSE_VERSION,
+        frame_id & 0xFF,
+        flags,
+        x100 & 0xFF,
+        (x100 >> 8) & 0xFF,
+        y100 & 0xFF,
+        (y100 >> 8) & 0xFF,
+        confidence,
+    ])
+    uart.write(bytearray(POSE_HEAD))
+    uart.write(payload)
+    uart.write(bytearray([crc8_atm(payload), POSE_TAIL]))
+def print_status(frame_id, fps, car_pose, exposure_us):
     if (not DEBUG_PRINT_STATUS or
         (frame_id % DEBUG_PRINT_EVERY_N_FRAMES) != 0):
         return
-    print("frame=%d fps=%.2f car=%s exp=%d" %
-          (frame_id, fps, str(car_cell), int(exposure_us)))
+    print("frame=%d fps=%.2f pose=%s exp=%d" %
+          (frame_id, fps, str(car_pose), int(exposure_us)))
 sensor.reset()
 sensor.set_pixformat(sensor.RGB565)
 sensor.set_framesize(sensor.QVGA)
@@ -224,28 +357,29 @@ if ENABLE_UART:
 frame_id = 0
 runtime_exposure_us = sensor.get_exposure_us()
 active_map_roi = inner_map_roi(MAP_ROI)
+map_homography = build_map_homography(MAP_CORNERS)
 while True:
     clock.tick()
     frame_id += 1
     img = sensor.snapshot()
-    if car_debug == True:
-        blobs = img.find_blobs(CAR_THRESHOLDS,roi=active_map_roi,area_threshold=5, pixels_threshold=5, merge=True)
-        if blobs:
-            for blob in blobs:
-                print(blob.cx()," ",blob.cy())
-    car_blob = find_car_blob(img, MAP_ROI)
-    car_cell = car_cell_from_blob(car_blob, MAP_ROI)
-    grid = build_grid(img, MAP_ROI)
-    if car_cell is not None:
-        row, col = car_cell
-        if grid[row][col] in (STATE_WALL, STATE_ROAD):
-            grid[row][col] = STATE_ROAD
-    print_status(frame_id, clock.fps(), car_cell, runtime_exposure_us)
+    car_pose = find_car_pose(img, MAP_ROI, map_homography)
+    car_cell = car_cell_from_pose(car_pose)
+    if car_debug and car_pose is not None:
+        print("pose", car_pose[0], car_pose[1], car_pose[2])
+    print_status(frame_id, clock.fps(), car_pose, runtime_exposure_us)
     if ENABLE_UART and uart is not None:
-        send_uart(uart, grid, car_cell)
+        send_pose_uart(uart, frame_id, car_pose)
+    if (frame_id % MAP_SEND_EVERY_N_FRAMES) == 0:
+        grid = build_grid(img, MAP_ROI)
+        if car_cell is not None:
+            row, col = car_cell
+            if grid[row][col] in (STATE_WALL, STATE_ROAD):
+                grid[row][col] = STATE_ROAD
+        if ENABLE_UART and uart is not None:
+            send_uart(uart, grid, car_cell)
+        if DEBUG_PRINT_GRID:
+            for row in grid:
+                print(row)
+            print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
     img.draw_rectangle(active_map_roi, color=(0,0,0))
     draw_grid(img, MAP_ROI)
-    if DEBUG_PRINT_GRID:
-        for row in grid:
-            print(row)
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")

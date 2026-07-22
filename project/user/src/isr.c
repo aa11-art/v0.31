@@ -47,6 +47,12 @@ volatile int photo_data[12][16];
 volatile int car_x, car_y;
 volatile int flag = 0;
 volatile uint32_t camera_frame_sequence = 0u;
+volatile uint32_t camera_pose_sequence = 0u;
+volatile uint16_t camera_pose_x100 = POSE_INVALID_COORD;
+volatile uint16_t camera_pose_y100 = POSE_INVALID_COORD;
+volatile uint8_t camera_pose_confidence = 0u;
+volatile uint8_t camera_pose_valid = 0u;
+volatile uint8_t camera_pose_frame_sequence = 0u;
 
 //volatile uint8_t g_frame_ready = 0;
 //volatile uint8_t g_frame_buf[FRAME_LEN];
@@ -105,39 +111,120 @@ void PIT_IRQHandler(void)
 }
 
 
+static uint8_t camera_pose_crc8(const uint8_t *data, uint8_t length)
+{
+    uint8_t crc = 0u;
+    uint8_t index;
+    for(index = 0u; index < length; index++)
+    {
+        uint8_t bit;
+        crc ^= data[index];
+        for(bit = 0u; bit < 8u; bit++)
+        {
+            if((crc & 0x80u) != 0u)
+            {
+                crc = (uint8_t)((crc << 1u) ^ 0x07u);
+            }
+            else
+            {
+                crc <<= 1u;
+            }
+        }
+    }
+    return crc;
+}
+
 void LPUART1_IRQHandler(void)
 {
-    static int i = 0;
-    static int data[197];
+    static uint8_t frame_type = 0u;
+    static uint16_t frame_index = 0u;
+    static uint8_t map_data[FRAME_LEN];
+    static uint8_t pose_data[POSE_FRAME_LEN];
+
     if(kLPUART_RxDataRegFullFlag & LPUART_GetStatusFlags(LPUART1))
     {
-        data[i++] = LPUART_ReadByte(LPUART1);
-        if (data[0] != 0xa3)
-            i = 0;
-        if ((i == 2) && (data[1] != 0xb3))
-            i = 0;
-        if (i == 197)
+        uint8_t value = LPUART_ReadByte(LPUART1);
+
+        if(frame_index == 0u)
         {
-            if (data[196] == 0xc3)
+            if(value == FRAME_HEAD0)
             {
-                int x, y;
-                camera_frame_sequence++;
-                for (x = 0; x < 12; x++)
-                {
-                    for (y = 0; y < 16; y++)
-                    {
-                        photo_data[x][y] = data[2 + x * 16 + y];
-                    }
-                }
-                car_x = data[194];
-                car_y = data[195];
-                camera_frame_sequence++;
-                flag = 1;
+                frame_type = 1u;
+                map_data[0] = value;
+                frame_index = 1u;
             }
-            i = 0;
+            else if(value == POSE_FRAME_HEAD0)
+            {
+                frame_type = 2u;
+                pose_data[0] = value;
+                frame_index = 1u;
+            }
         }
-        if (i > 197)
-            i = 0;
+        else if(frame_type == 1u)
+        {
+            map_data[frame_index++] = value;
+            if((frame_index == 2u) && (map_data[1] != FRAME_HEAD1))
+            {
+                frame_index = 0u;
+                frame_type = 0u;
+            }
+            else if(frame_index == FRAME_LEN)
+            {
+                if(map_data[TAIL_IDX] == FRAME_TAIL)
+                {
+                    uint8_t row;
+                    uint8_t col;
+                    camera_frame_sequence++;
+                    for(row = 0u; row < 12u; row++)
+                    {
+                        for(col = 0u; col < 16u; col++)
+                        {
+                            photo_data[row][col] = map_data[IMG_OFFSET + row * 16u + col];
+                        }
+                    }
+                    car_x = map_data[CAR_X_IDX];
+                    car_y = map_data[CAR_Y_IDX];
+                    camera_frame_sequence++;
+                    flag = 1;
+                }
+                frame_index = 0u;
+                frame_type = 0u;
+            }
+        }
+        else
+        {
+            pose_data[frame_index++] = value;
+            if((frame_index == 2u) && (pose_data[1] != POSE_FRAME_HEAD1))
+            {
+                frame_index = 0u;
+                frame_type = 0u;
+            }
+            else if(frame_index == POSE_FRAME_LEN)
+            {
+                uint8_t crc = camera_pose_crc8(&pose_data[2], 8u);
+                if((pose_data[2] == POSE_FRAME_VERSION) &&
+                   (pose_data[10] == crc) &&
+                   (pose_data[11] == POSE_FRAME_TAIL))
+                {
+                    uint16_t x100 = (uint16_t)(pose_data[5] |
+                                               ((uint16_t)pose_data[6] << 8u));
+                    uint16_t y100 = (uint16_t)(pose_data[7] |
+                                               ((uint16_t)pose_data[8] << 8u));
+                    uint8_t valid = (uint8_t)(((pose_data[4] & POSE_FLAG_VALID) != 0u) &&
+                                              (x100 != POSE_INVALID_COORD) &&
+                                              (y100 != POSE_INVALID_COORD));
+                    camera_pose_sequence++;
+                    camera_pose_frame_sequence = pose_data[3];
+                    camera_pose_x100 = x100;
+                    camera_pose_y100 = y100;
+                    camera_pose_confidence = pose_data[9];
+                    camera_pose_valid = valid;
+                    camera_pose_sequence++;
+                }
+                frame_index = 0u;
+                frame_type = 0u;
+            }
+        }
     }
     LPUART_ClearStatusFlags(LPUART1, kLPUART_RxOverrunFlag);
 }

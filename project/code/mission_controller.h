@@ -4,11 +4,11 @@
 #include "sokoban_solver.h"
 
 #ifndef MISSION_FIRST_LEVEL
-#define MISSION_FIRST_LEVEL (2u)
+#define MISSION_FIRST_LEVEL (1u)
 #endif
 
 #ifndef MISSION_LAST_LEVEL
-#define MISSION_LAST_LEVEL  (2u)
+#define MISSION_LAST_LEVEL  (1u)
 #endif
 
 #if (MISSION_FIRST_LEVEL < 1u) || (MISSION_FIRST_LEVEL > 3u)

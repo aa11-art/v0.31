@@ -10,6 +10,7 @@
 #define SOKOBAN_MAX_BOXES       (10u)
 #define SOKOBAN_MAX_BOMBS       (3u)
 #define SOKOBAN_MAX_MOVES       (2048u)
+#define SOKOBAN_PUSH_FLAG_BYTES ((SOKOBAN_MAX_MOVES + 7u) / 8u)
 #define SOKOBAN_MAX_OBJECTS     (SOKOBAN_MAX_BOXES * 2u)
 #define SOKOBAN_BOMB_LABEL      (255u)
 #define SOKOBAN_INVALID_CELL    (0xFFu)
@@ -62,6 +63,7 @@ typedef struct
     uint16_t blast_move_indices[SOKOBAN_MAX_BOMBS];
     uint8_t blast_rows[SOKOBAN_MAX_BOMBS];
     uint8_t blast_cols[SOKOBAN_MAX_BOMBS];
+    uint8_t push_flags[SOKOBAN_PUSH_FLAG_BYTES];
     char move_seq[SOKOBAN_MAX_MOVES + 1u];
 } sokoban_solution_t;
 
@@ -140,6 +142,8 @@ sokoban_status_t sokoban_find_best_bomb_wall(const char map[SOKOBAN_MAP_HEIGHT][
 sokoban_direction_t sokoban_direction_turn(sokoban_direction_t heading, int8_t quarter_turns);
 sokoban_body_direction_t sokoban_world_to_body(sokoban_direction_t heading,
                                                sokoban_direction_t world_direction);
+uint8_t sokoban_solution_move_is_push(const sokoban_solution_t *solution,
+                                      uint16_t move_index);
 sokoban_status_t sokoban_plan_inspection(const char map[SOKOBAN_MAP_HEIGHT][SOKOBAN_MAP_STRIDE],
                                          sokoban_direction_t initial_heading,
                                          sokoban_inspection_plan_t *plan);

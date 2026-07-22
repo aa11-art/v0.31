@@ -50,9 +50,23 @@
 #define CAR_Y_IDX      195
 #define TAIL_IDX       196
 
+#define POSE_FRAME_LEN       12
+#define POSE_FRAME_HEAD0     0xA4
+#define POSE_FRAME_HEAD1     0xB4
+#define POSE_FRAME_VERSION   0x01
+#define POSE_FRAME_TAIL      0xC4
+#define POSE_FLAG_VALID      0x01
+#define POSE_INVALID_COORD   0xFFFFu
+
 extern volatile int photo_data[12][16];
 extern volatile int car_x, car_y;
 extern volatile int flag ;
+extern volatile uint32_t camera_pose_sequence;
+extern volatile uint16_t camera_pose_x100;
+extern volatile uint16_t camera_pose_y100;
+extern volatile uint8_t camera_pose_confidence;
+extern volatile uint8_t camera_pose_valid;
+extern volatile uint8_t camera_pose_frame_sequence;
 
 extern volatile uint8_t g_frame_ready;
 extern volatile uint8_t g_frame_buf[FRAME_LEN];
