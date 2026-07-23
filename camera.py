@@ -5,7 +5,7 @@ GRID_COLS = 16
 GRID_ROWS = 12
 FRAME_W = 320
 FRAME_H = 240
-MAP_ROI = (38, 40, 238, 171)
+MAP_ROI = (35, 39, 240, 173)
 # Outer map corners in TL, TR, BR, BL order. Replace these defaults with
 # measured image coordinates after the camera mount is fixed.
 MAP_CORNERS = ((38, 40), (275, 40), (275, 210), (38, 210))
@@ -46,22 +46,22 @@ FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
     "box": (0, 100, -53, 127, 127, 49),
-    "goal": (100, 42, 82, 127, -55, -128),
+    "goal": (100, 0, 80, 127, 127, -128),
     "car_head": (0, 100, -12, -128, -128, -13),
     "car_tail": (63, 40, -128, -38, 127, -128),
     "road": (0, 100, -128, 80, -128, -57),
     "bomb": (0, 100, 26, 127, 127, -38),
 }
-ROAD_PIXELS_THRESHOLD = 30
-ROAD_AREA_THRESHOLD = 30
-GOAL_PIXELS_THRESHOLD = 8
-GOAL_AREA_THRESHOLD = 7
-BOX_PIXELS_THRESHOLD = 8
-BOX_AREA_THRESHOLD = 7
-CAR_PIXELS_THRESHOLD = 5
-CAR_AREA_THRESHOLD = 4
-BOMB_PIXELS_THRESHOLD = 14
-BOMB_AREA_THRESHOLD = 7
+ROAD_PIXELS_THRESHOLD = 23
+ROAD_AREA_THRESHOLD = 23
+GOAL_PIXELS_THRESHOLD = 5
+GOAL_AREA_THRESHOLD = 4
+BOX_PIXELS_THRESHOLD = 5
+BOX_AREA_THRESHOLD = 4
+CAR_PIXELS_THRESHOLD = 4
+CAR_AREA_THRESHOLD = 3
+BOMB_PIXELS_THRESHOLD = 10
+BOMB_AREA_THRESHOLD = 5
 def normalize_lab_threshold(threshold):
     l0, l1, a0, a1, b0, b1 = threshold
     if l0 > l1: l0, l1 = l1, l0
