@@ -70,7 +70,9 @@ void PIT_IRQHandler(void)
     if(pit_flag_get(PIT_CH0))
     {
         encoder_get_speed();
-#if POSITION_STEP_TEST_MODE
+#if WHEEL_SPEED_TUNE_MODE
+        wheel_speed_tune_update_10ms();
+#elif POSITION_STEP_TEST_MODE
         position_step_test_update_10ms();
 #elif GYRO_SPEED_TUNE_MODE
         gyro_speed_tune_update_10ms();
@@ -90,17 +92,21 @@ void PIT_IRQHandler(void)
         pit_flag_clear(PIT_CH0);
     }
     
+
     if(pit_flag_get(PIT_CH1))
     {   
         get_yaw();
         pit_flag_clear(PIT_CH1);
     }
     
+#if !WHEEL_SPEED_TUNE_MODE && !GYRO_SPEED_TUNE_MODE
     if(pit_flag_get(PIT_CH2))
     {
         mission_controller_update_10ms();
         pit_flag_clear(PIT_CH2);
     }
+#endif
+
     
     if(pit_flag_get(PIT_CH3))
     {

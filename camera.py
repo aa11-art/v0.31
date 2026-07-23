@@ -3,12 +3,16 @@ import time
 from machine import UART
 GRID_COLS = 16
 GRID_ROWS = 12
+VISIBLE_COLS = GRID_COLS - 2
+VISIBLE_ROWS = GRID_ROWS - 2
 FRAME_W = 320
 FRAME_H = 240
-MAP_ROI = (35, 39, 240, 173)
-# Outer map corners in TL, TR, BR, BL order. Replace these defaults with
-# measured image coordinates after the camera mount is fixed.
-MAP_CORNERS = ((38, 40), (275, 40), (275, 210), (38, 210))
+# ROI contains only the visible 14 x 10 playable area. The outer wall ring is
+# synthesized in the grid and is not present in the image.
+MAP_ROI = (49, 54, 213, 148)
+# Visible-area boundary corners in TL, TR, BR, BL order. Replace these
+# defaults with measured image coordinates after the camera mount is fixed.
+MAP_CORNERS = ((49, 54), (262, 54), (262, 202), (49, 202))
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -26,7 +30,7 @@ STATE_PRIORITY = {
 }
 DEBUG_DRAW_GRID = False
 DEBUG_PRINT_STATUS = False
-car_debug = False
+car_debug = True
 DEBUG_PRINT_EVERY_N_FRAMES = 10
 DEBUG_PRINT_GRID = False
 ENABLE_UART = True
@@ -38,17 +42,15 @@ POSE_FLAG_VALID = 0x01
 POSE_INVALID_COORD = 0xFFFF
 POSE_HEAD = (0xA4, 0xB4)
 POSE_TAIL = 0xC4
-CAR_PAIR_MIN_DISTANCE = 0.15
-CAR_PAIR_MAX_DISTANCE = 1.20
-CAR_PAIR_AMBIGUITY_RATIO = 0.90
-CAR_MARKER_MAX_CELL_SIZE = 1.20
+CAR_BODY_AMBIGUITY_RATIO = 0.90
+CAR_BODY_MIN_CELL_SIZE = 0.50
+CAR_BODY_MAX_CELL_SIZE = 1.20
 FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
     "box": (0, 100, -53, 127, 127, 49),
     "goal": (100, 0, 80, 127, 127, -128),
-    "car_head": (0, 100, -12, -128, -128, -13),
-    "car_tail": (63, 40, -128, -38, 127, -128),
+    "car_body": (0, 100, -44, -128, -128, 84),
     "road": (0, 100, -128, 80, -128, -57),
     "bomb": (0, 100, 26, 127, 127, -38),
 }
@@ -58,8 +60,8 @@ GOAL_PIXELS_THRESHOLD = 5
 GOAL_AREA_THRESHOLD = 4
 BOX_PIXELS_THRESHOLD = 5
 BOX_AREA_THRESHOLD = 4
-CAR_PIXELS_THRESHOLD = 4
-CAR_AREA_THRESHOLD = 3
+CAR_PIXELS_THRESHOLD = 15
+CAR_AREA_THRESHOLD = 15
 BOMB_PIXELS_THRESHOLD = 10
 BOMB_AREA_THRESHOLD = 5
 def normalize_lab_threshold(threshold):
@@ -114,10 +116,10 @@ def solve_linear_system(matrix, values):
     return [augmented[row][size] for row in range(size)]
 def build_map_homography(corners):
     target = (
-        (-0.5, -0.5),
-        (GRID_COLS - 0.5, -0.5),
-        (GRID_COLS - 0.5, GRID_ROWS - 0.5),
-        (-0.5, GRID_ROWS - 0.5),
+        (0.5, 0.5),
+        (GRID_COLS - 1.5, 0.5),
+        (GRID_COLS - 1.5, GRID_ROWS - 1.5),
+        (0.5, GRID_ROWS - 1.5),
     )
     matrix = []
     values = []
@@ -139,26 +141,21 @@ def pixel_to_grid(px, py, homography):
 def create_grid(default_state):
     return [[default_state for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 def inner_map_roi(map_roi):
-    rx, ry, rw, rh = map_roi
-    x0 = int(rx + rw / GRID_COLS + 0.5)
-    y0 = int(ry + rh / GRID_ROWS + 0.5)
-    x1 = int(rx + rw * (GRID_COLS - 1) / GRID_COLS + 0.5)
-    y1 = int(ry + rh * (GRID_ROWS - 1) / GRID_ROWS + 0.5)
-    return (x0, y0, x1 - x0, y1 - y0)
+    return map_roi
 def draw_grid(img, map_roi):
     if not DEBUG_DRAW_GRID:
         return
     rx, ry, rw, rh = map_roi
-    cell_w = rw / GRID_COLS
-    cell_h = rh / GRID_ROWS
+    cell_w = rw / VISIBLE_COLS
+    cell_h = rh / VISIBLE_ROWS
     inner_size = int(min(cell_w, cell_h) * INNER_SIZE_RATIO)
     if inner_size < 2:
         inner_size = 2
     half = inner_size // 2
     for row in range(1, GRID_ROWS - 1):
         for col in range(1, GRID_COLS - 1):
-            cx = int(rx + (col + 0.5) * cell_w)
-            cy = int(ry + (row + 0.5) * cell_h)
+            cx = int(rx + (col - 0.5) * cell_w)
+            cy = int(ry + (row - 0.5) * cell_h)
             x0 = clamp(cx - half, 0, FRAME_W - 1)
             y0 = clamp(cy - half, 0, FRAME_H - 1)
             x1 = clamp(cx + half - 1, 0, FRAME_W - 1)
@@ -181,16 +178,16 @@ def classify_grid_blobs(blobs):
 def build_grid(img, map_roi):
     grid = create_grid(STATE_WALL)
     rx, ry, rw, rh = map_roi
-    cell_w = rw / GRID_COLS
-    cell_h = rh / GRID_ROWS
+    cell_w = rw / VISIBLE_COLS
+    cell_h = rh / VISIBLE_ROWS
     inner_size = int(min(cell_w, cell_h) * INNER_SIZE_RATIO)
     if inner_size < 2:
         inner_size = 2
     half = inner_size // 2
     for row in range(1, GRID_ROWS - 1):
         for col in range(1, GRID_COLS - 1):
-            cx = int(rx + (col + 0.5) * cell_w)
-            cy = int(ry + (row + 0.5) * cell_h)
+            cx = int(rx + (col - 0.5) * cell_w)
+            cy = int(ry + (row - 0.5) * cell_h)
             x0 = clamp(cx - half, 0, FRAME_W - 1)
             y0 = clamp(cy - half, 0, FRAME_H - 1)
             roi_w = clamp(inner_size, 1, FRAME_W - x0)
@@ -205,65 +202,71 @@ def build_grid(img, map_roi):
             )
             grid[row][col] = classify_grid_blobs(blobs)
     return grid
-def find_marker_candidates(img, threshold, map_roi):
+def find_car_body_candidates(img, map_roi):
     candidates = []
-    cell_w = map_roi[2] / GRID_COLS
-    cell_h = map_roi[3] / GRID_ROWS
-    max_w = cell_w * CAR_MARKER_MAX_CELL_SIZE
-    max_h = cell_h * CAR_MARKER_MAX_CELL_SIZE
+    cell_w = map_roi[2] / VISIBLE_COLS
+    cell_h = map_roi[3] / VISIBLE_ROWS
+    min_w = cell_w * CAR_BODY_MIN_CELL_SIZE
+    min_h = cell_h * CAR_BODY_MIN_CELL_SIZE
+    max_w = cell_w * CAR_BODY_MAX_CELL_SIZE
+    max_h = cell_h * CAR_BODY_MAX_CELL_SIZE
     blobs = img.find_blobs(
-        [threshold],
+        [THRESHOLDS["car_body"]],
         roi=inner_map_roi(map_roi),
         pixels_threshold=CAR_PIXELS_THRESHOLD,
         area_threshold=CAR_AREA_THRESHOLD,
-        merge=False,
+        merge=True,
+        margin=0,
     )
     for blob in blobs:
-        if blob.w() <= max_w and blob.h() <= max_h:
+        if (blob.w() >= min_w and blob.w() <= max_w and
+            blob.h() >= min_h and blob.h() <= max_h):
             candidates.append(blob)
-    return candidates
-def find_car_pose(img, map_roi, homography):
-    head_candidates = find_marker_candidates(img, THRESHOLDS["car_head"], map_roi)
-    tail_candidates = find_marker_candidates(img, THRESHOLDS["car_tail"], map_roi)
-    min_distance_sq = CAR_PAIR_MIN_DISTANCE * CAR_PAIR_MIN_DISTANCE
-    max_distance_sq = CAR_PAIR_MAX_DISTANCE * CAR_PAIR_MAX_DISTANCE
+    return (blobs, candidates)
+def find_car_pose(img, map_roi, homography, debug=False):
+    blobs, candidates = find_car_body_candidates(img, map_roi)
     best = None
     best_score = -1
     second_score = -1
-    for head in head_candidates:
-        head_grid = pixel_to_grid(head.cx(), head.cy(), homography)
-        if head_grid is None:
-            continue
-        for tail in tail_candidates:
-            tail_grid = pixel_to_grid(tail.cx(), tail.cy(), homography)
-            if tail_grid is None:
-                continue
-            dx = head_grid[0] - tail_grid[0]
-            dy = head_grid[1] - tail_grid[1]
-            distance_sq = dx * dx + dy * dy
-            if distance_sq < min_distance_sq or distance_sq > max_distance_sq:
-                continue
-            center_x = (head_grid[0] + tail_grid[0]) * 0.5
-            center_y = (head_grid[1] + tail_grid[1]) * 0.5
-            if (center_x < 0.5 or center_x > GRID_COLS - 1.5 or
-                center_y < 0.5 or center_y > GRID_ROWS - 1.5):
-                continue
-            score = head.pixels() + tail.pixels()
-            if score > best_score:
-                second_score = best_score
-                best_score = score
-                best = (center_x, center_y, head, tail)
-            elif score > second_score:
-                second_score = score
+    for blob in candidates:
+        score = blob.pixels()
+        if score > best_score:
+            second_score = best_score
+            best_score = score
+            best = blob
+        elif score > second_score:
+            second_score = score
     if best is None:
+        if debug:
+            reason = "no_blob" if len(blobs) == 0 else "size_rejected"
+            print("car blobs=%d accepted=%d best_pixels=0 second_pixels=0 reason=%s" %
+                  (len(blobs), len(candidates), reason))
         return None
-    if second_score >= 0 and second_score >= best_score * CAR_PAIR_AMBIGUITY_RATIO:
+    if second_score >= 0 and second_score >= best_score * CAR_BODY_AMBIGUITY_RATIO:
+        if debug:
+            print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d reason=ambiguous" %
+                  (len(blobs), len(candidates), best_score, second_score))
+        return None
+    center_px = best.x() + best.w() * 0.5
+    center_py = best.y() + best.h() * 0.5
+    center_grid = pixel_to_grid(center_px, center_py, homography)
+    if (center_grid is None or
+        center_grid[0] < 0.5 or center_grid[0] > GRID_COLS - 1.5 or
+        center_grid[1] < 0.5 or center_grid[1] > GRID_ROWS - 1.5):
+        if debug:
+            print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d reason=out_of_map" %
+                  (len(blobs), len(candidates), best_score, second_score))
         return None
     if second_score < 0:
         confidence = 100
     else:
         confidence = clamp(int(100 * (best_score - second_score) / best_score), 0, 100)
-    return (best[0], best[1], confidence, best[2], best[3])
+    if debug:
+        print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d" %
+              (len(blobs), len(candidates), best_score, second_score))
+        print("car pose=(%.2f,%.2f) confidence=%d" %
+              (center_grid[0], center_grid[1], confidence))
+    return (center_grid[0], center_grid[1], confidence, best)
 def car_cell_from_pose(car_pose):
     if car_pose is None:
         return None
@@ -362,10 +365,13 @@ while True:
     clock.tick()
     frame_id += 1
     img = sensor.snapshot()
-    car_pose = find_car_pose(img, MAP_ROI, map_homography)
+    car_pose = find_car_pose(
+        img,
+        MAP_ROI,
+        map_homography,
+        car_debug and (frame_id % DEBUG_PRINT_EVERY_N_FRAMES) == 0,
+    )
     car_cell = car_cell_from_pose(car_pose)
-    if car_debug and car_pose is not None:
-        print("pose", car_pose[0], car_pose[1], car_pose[2])
     print_status(frame_id, clock.fps(), car_pose, runtime_exposure_us)
     if ENABLE_UART and uart is not None:
         send_pose_uart(uart, frame_id, car_pose)

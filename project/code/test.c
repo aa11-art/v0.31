@@ -8,6 +8,346 @@
 
 typedef enum
 {
+    WHEEL_SPEED_TUNE_WHEEL = 0,
+    WHEEL_SPEED_TUNE_KP,
+    WHEEL_SPEED_TUNE_KI,
+    WHEEL_SPEED_TUNE_KD,
+    WHEEL_SPEED_TUNE_RUN
+} wheel_speed_tune_item_t;
+
+#define WHEEL_SPEED_TUNE_ITEM_COUNT       (5u)
+#define WHEEL_SPEED_TUNE_WHEEL_COUNT      (4u)
+#define WHEEL_SPEED_TUNE_VX_TARGET        (80.0f)
+#define WHEEL_SPEED_TUNE_KP_STEP          (0.1f)
+#define WHEEL_SPEED_TUNE_KI_STEP          (0.05f)
+#define WHEEL_SPEED_TUNE_KD_STEP          (0.1f)
+#define WHEEL_SPEED_TUNE_GAIN_MIN         (0.0f)
+#define WHEEL_SPEED_TUNE_KP_MAX           (20.0f)
+#define WHEEL_SPEED_TUNE_KI_MAX           (5.0f)
+#define WHEEL_SPEED_TUNE_KD_MAX           (20.0f)
+#define WHEEL_SPEED_TUNE_TIMEOUT_10MS     (1000u)
+
+static volatile wheel_speed_tune_item_t s_wheel_speed_tune_item =
+    WHEEL_SPEED_TUNE_WHEEL;
+static volatile uint8 s_wheel_speed_tune_wheel = 0u;
+static volatile uint8 s_wheel_speed_tune_running = 0u;
+static volatile uint8 s_wheel_speed_tune_timed_out = 0u;
+static volatile float s_wheel_speed_tune_kp[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {8.0f, 8.0f, 8.0f, 8.0f};
+static volatile float s_wheel_speed_tune_ki[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {0.3f, 0.3f, 0.3f, 0.3f};
+static volatile float s_wheel_speed_tune_kd[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {0.0f, 0.0f, 0.0f, 0.0f};
+static volatile uint16 s_wheel_speed_tune_run_10ms = 0u;
+static uint8 s_wheel_speed_tune_wait_release = 1u;
+static uint8 s_wheel_speed_tune_screen_tick = 0u;
+
+static uint8 control_tune_any_key_pressed(void)
+{
+    return (uint8)((gpio_get_level(C14) == GPIO_LOW) ||
+                   (gpio_get_level(C13) == GPIO_LOW) ||
+                   (gpio_get_level(C12) == GPIO_LOW));
+}
+
+static float wheel_speed_tune_adjust(float value, float step,
+                                     float minimum, float maximum,
+                                     int8 direction)
+{
+    value += step * (float)direction;
+    if(value < minimum) value = minimum;
+    if(value > maximum) value = maximum;
+    if((minimum == 0.0f) && (value < step * 0.5f)) value = 0.0f;
+    return value;
+}
+
+static void wheel_speed_tune_apply_gain(uint8 wheel)
+{
+    MecanumSetWheelSpeedPidGains(wheel,
+                                s_wheel_speed_tune_kp[wheel],
+                                s_wheel_speed_tune_ki[wheel],
+                                s_wheel_speed_tune_kd[wheel]);
+}
+
+static void wheel_speed_tune_stop(uint8 timed_out)
+{
+    s_wheel_speed_tune_running = 0u;
+    s_wheel_speed_tune_timed_out = timed_out;
+    v_fL = 0.0f;
+    v_fR = 0.0f;
+    v_bL = 0.0f;
+    v_bR = 0.0f;
+    MecanumCarStop();
+}
+
+void wheel_speed_tune_init(void)
+{
+    uint8 wheel;
+
+    s_wheel_speed_tune_item = WHEEL_SPEED_TUNE_WHEEL;
+    s_wheel_speed_tune_wheel = 0u;
+    for(wheel = 0u; wheel < WHEEL_SPEED_TUNE_WHEEL_COUNT; wheel++)
+    {
+        s_wheel_speed_tune_kp[wheel] = 10.0f;
+        s_wheel_speed_tune_ki[wheel] = 1.0f;
+        s_wheel_speed_tune_kd[wheel] = 0.0f;
+        wheel_speed_tune_apply_gain(wheel);
+    }
+    s_wheel_speed_tune_run_10ms = 0u;
+    s_wheel_speed_tune_wait_release = 1u;
+    s_wheel_speed_tune_screen_tick = 0u;
+    wheel_speed_tune_stop(0u);
+}
+
+void wheel_speed_tune_process_keys(void)
+{
+    key_scanner();
+
+    if(s_wheel_speed_tune_running != 0u)
+    {
+        if(control_tune_any_key_pressed() != 0u)
+        {
+            __disable_irq();
+            wheel_speed_tune_stop(0u);
+            __enable_irq();
+            key_clear_all_state();
+            s_wheel_speed_tune_wait_release = 1u;
+        }
+        return;
+    }
+
+    if(s_wheel_speed_tune_wait_release != 0u)
+    {
+        if(control_tune_any_key_pressed() == 0u)
+        {
+            key_clear_all_state();
+            s_wheel_speed_tune_wait_release = 0u;
+        }
+        return;
+    }
+
+    if(key_get_state(KEY_2) == KEY_SHORT_PRESS)
+    {
+        s_wheel_speed_tune_item = (wheel_speed_tune_item_t)(
+            ((uint8)s_wheel_speed_tune_item + 1u) %
+            WHEEL_SPEED_TUNE_ITEM_COUNT);
+        key_clear_state(KEY_2);
+    }
+    else if((key_get_state(KEY_3) == KEY_SHORT_PRESS) ||
+            (key_get_state(KEY_4) == KEY_SHORT_PRESS))
+    {
+        int8 direction =
+            (key_get_state(KEY_3) == KEY_SHORT_PRESS) ? -1 : 1;
+
+        __disable_irq();
+        s_wheel_speed_tune_timed_out = 0u;
+        if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_WHEEL)
+        {
+            s_wheel_speed_tune_wheel = (uint8)(
+                (s_wheel_speed_tune_wheel +
+                 ((direction > 0) ? 1u :
+                  (WHEEL_SPEED_TUNE_WHEEL_COUNT - 1u))) %
+                WHEEL_SPEED_TUNE_WHEEL_COUNT);
+            MecanumSpeedPidReset();
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KP)
+        {
+            s_wheel_speed_tune_kp[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_kp[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KP_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KP_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KI)
+        {
+            s_wheel_speed_tune_ki[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_ki[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KI_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KI_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KD)
+        {
+            s_wheel_speed_tune_kd[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_kd[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KD_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KD_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if((s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_RUN) &&
+                (direction > 0))
+        {
+            s_wheel_speed_tune_run_10ms = 0u;
+            MecanumSpeedPidReset();
+            s_wheel_speed_tune_running = 1u;
+        }
+        __enable_irq();
+        key_clear_all_state();
+    }
+}
+
+void wheel_speed_tune_update_10ms(void)
+{
+    if(s_wheel_speed_tune_running != 0u)
+    {
+        if(s_wheel_speed_tune_run_10ms >=
+           WHEEL_SPEED_TUNE_TIMEOUT_10MS)
+        {
+            wheel_speed_tune_stop(1u);
+        }
+        else
+        {
+            s_wheel_speed_tune_run_10ms++;
+            v_fL = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_fR = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_bL = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_bR = WHEEL_SPEED_TUNE_VX_TARGET;
+            MecanumMotorSpeedControl();
+        }
+    }
+    else
+    {
+        v_fL = 0.0f;
+        v_fR = 0.0f;
+        v_bL = 0.0f;
+        v_bR = 0.0f;
+        MecanumMotorSpeedControl();
+    }
+}
+
+void wheel_speed_tune_screen_init(void)
+{
+    ips200_clear();
+    ips200_show_string(0,   0, "WHEEL SPEED PID TUNE");
+    ips200_show_string(0,  16, "STATE/ITEM");
+    ips200_show_string(0,  32, "WHEEL");
+    ips200_show_string(0,  48, "VX TARGET");
+    ips200_show_string(0,  64, "KP");
+    ips200_show_string(0,  80, "KI");
+    ips200_show_string(0,  96, "KD");
+    ips200_show_string(0, 112, "WHL FB     ERR    PWM");
+    ips200_show_string(0, 128, " FL");
+    ips200_show_string(0, 144, " FR");
+    ips200_show_string(0, 160, " BL");
+    ips200_show_string(0, 176, " BR");
+    ips200_show_string(0, 192, "RUN SEC");
+    ips200_show_string(0, 208, "ALL K4:GO ANY:STOP");
+    ips200_show_string(0, 224, "K2:NEXT K3:- K4:+");
+}
+
+static void wheel_speed_tune_show_wheel(uint16 y, int feedback,
+                                        float target, float output)
+{
+    ips200_show_int(24, y, feedback, 6);
+    ips200_show_int(88, y, (int)(target - (float)feedback), 6);
+    ips200_show_int(152, y, (int)output, 6);
+}
+
+void wheel_speed_tune_screen_update(void)
+{
+    wheel_speed_tune_item_t item;
+    uint8 running;
+    uint8 timed_out;
+    uint8 wheel;
+    uint16 run_10ms;
+    float kp;
+    float ki;
+    float kd;
+    int fl;
+    int fr;
+    int bl;
+    int br;
+    float out_fl;
+    float out_fr;
+    float out_bl;
+    float out_br;
+    float active_target;
+
+    if(++s_wheel_speed_tune_screen_tick < 10u)
+    {
+        return;
+    }
+    s_wheel_speed_tune_screen_tick = 0u;
+
+    __disable_irq();
+    item = s_wheel_speed_tune_item;
+    running = s_wheel_speed_tune_running;
+    timed_out = s_wheel_speed_tune_timed_out;
+    wheel = s_wheel_speed_tune_wheel;
+    run_10ms = s_wheel_speed_tune_run_10ms;
+    kp = s_wheel_speed_tune_kp[wheel];
+    ki = s_wheel_speed_tune_ki[wheel];
+    kd = s_wheel_speed_tune_kd[wheel];
+    fl = encoder_fl;
+    fr = encoder_fr;
+    bl = encoder_bl;
+    br = encoder_br;
+    out_fl = pwm_fl;
+    out_fr = pwm_fr;
+    out_bl = pwm_bl;
+    out_br = pwm_br;
+    __enable_irq();
+
+    if(running != 0u)
+    {
+        ips200_show_string(96, 16, "RUN ");
+    }
+    else if(timed_out != 0u)
+    {
+        ips200_show_string(96, 16, "TIME");
+    }
+    else
+    {
+        ips200_show_string(96, 16, "STOP");
+    }
+
+    switch(item)
+    {
+        case WHEEL_SPEED_TUNE_WHEEL:  ips200_show_string(152, 16, "WHL "); break;
+        case WHEEL_SPEED_TUNE_KP:     ips200_show_string(152, 16, "KP  "); break;
+        case WHEEL_SPEED_TUNE_KI:     ips200_show_string(152, 16, "KI  "); break;
+        case WHEEL_SPEED_TUNE_KD:     ips200_show_string(152, 16, "KD  "); break;
+        case WHEEL_SPEED_TUNE_RUN:    ips200_show_string(152, 16, "RUN "); break;
+        default:                      ips200_show_string(152, 16, "ERR "); break;
+    }
+
+    switch(wheel)
+    {
+        case 0u: ips200_show_string(96, 32, "FL"); break;
+        case 1u: ips200_show_string(96, 32, "FR"); break;
+        case 2u: ips200_show_string(96, 32, "BL"); break;
+        case 3u: ips200_show_string(96, 32, "BR"); break;
+        default: ips200_show_string(96, 32, "??"); break;
+    }
+
+    ips200_show_float(96, 48, WHEEL_SPEED_TUNE_VX_TARGET, 7, 1);
+    ips200_show_float(96, 64, kp,     6, 1);
+    ips200_show_float(96, 80, ki,     6, 2);
+    ips200_show_float(96, 96, kd,     6, 1);
+
+    ips200_show_string(0, 128, (wheel == 0u) ? ">FL" : " FL");
+    ips200_show_string(0, 144, (wheel == 1u) ? ">FR" : " FR");
+    ips200_show_string(0, 160, (wheel == 2u) ? ">BL" : " BL");
+    ips200_show_string(0, 176, (wheel == 3u) ? ">BR" : " BR");
+    active_target = (running != 0u) ? WHEEL_SPEED_TUNE_VX_TARGET : 0.0f;
+    wheel_speed_tune_show_wheel(128, fl,
+        active_target, out_fl);
+    wheel_speed_tune_show_wheel(144, fr,
+        active_target, out_fr);
+    wheel_speed_tune_show_wheel(160, bl,
+        active_target, out_bl);
+    wheel_speed_tune_show_wheel(176, br,
+        active_target, out_br);
+    ips200_show_float(96, 192, (float)run_10ms * 0.01f, 6, 1);
+}
+
+typedef enum
+{
     GYRO_SPEED_TUNE_TARGET = 0,
     GYRO_SPEED_TUNE_YAW_KP,
     GYRO_SPEED_TUNE_RATE_KP,
@@ -43,9 +383,7 @@ static uint8 s_gyro_speed_tune_screen_tick = 0u;
 
 static uint8 gyro_speed_tune_any_key_pressed(void)
 {
-    return (uint8)((gpio_get_level(C14) == GPIO_LOW) ||
-                   (gpio_get_level(C13) == GPIO_LOW) ||
-                   (gpio_get_level(C12) == GPIO_LOW));
+    return control_tune_any_key_pressed();
 }
 
 static float gyro_speed_tune_adjust_gain(float value, int8 direction)
@@ -383,20 +721,25 @@ void gyro_speed_tune_screen_update(void)
 #define POSITION_STEP_TEST_DT_S          (0.01f)
 #define POSITION_STEP_TEST_CELL_DEFAULT  (5u)
 #define POSITION_STEP_TEST_CELL_MAX      (10u)
-#define POSITION_STEP_TEST_DIST_DEFAULT  (24.0f)
+#define POSITION_STEP_TEST_DIST_DEFAULT  (22.0f)
 #define POSITION_STEP_TEST_DIST_STEP     (0.5f)
 #define POSITION_STEP_TEST_DIST_MIN      (15.0f)
 #define POSITION_STEP_TEST_DIST_MAX      (30.0f)
+#define POSITION_STEP_TEST_TOL_DEFAULT   (0.8f)
+#define POSITION_STEP_TEST_TOL_STEP      (0.1f)
+#define POSITION_STEP_TEST_TOL_MIN       (0.4f)
+#define POSITION_STEP_TEST_TOL_MAX       (2.0f)
 
 typedef enum
 {
     POSITION_STEP_TEST_ITEM_DIRECTION = 0,
     POSITION_STEP_TEST_ITEM_CELLS,
     POSITION_STEP_TEST_ITEM_DISTANCE,
+    POSITION_STEP_TEST_ITEM_TOLERANCE,
     POSITION_STEP_TEST_ITEM_RUN
 } position_step_test_item_t;
 
-#define POSITION_STEP_TEST_ITEM_COUNT (4u)
+#define POSITION_STEP_TEST_ITEM_COUNT (5u)
 
 static const char s_position_step_moves[4] = {'U', 'D', 'L', 'R'};
 static sokoban_solution_t s_position_step_solution;
@@ -407,6 +750,8 @@ static volatile uint8 s_position_step_cell_count =
     POSITION_STEP_TEST_CELL_DEFAULT;
 static volatile float s_position_step_cell_distance =
     POSITION_STEP_TEST_DIST_DEFAULT;
+static volatile float s_position_step_tolerance =
+    POSITION_STEP_TEST_TOL_DEFAULT;
 static volatile uint8 s_position_step_diag_active = 0u;
 static volatile uint8 s_position_step_aborted = 0u;
 static volatile float s_position_step_total_x = 0.0f;
@@ -437,6 +782,14 @@ static float position_step_test_adjust_distance(float value, int8 direction)
     value += POSITION_STEP_TEST_DIST_STEP * (float)direction;
     if(value < POSITION_STEP_TEST_DIST_MIN) value = POSITION_STEP_TEST_DIST_MIN;
     if(value > POSITION_STEP_TEST_DIST_MAX) value = POSITION_STEP_TEST_DIST_MAX;
+    return value;
+}
+
+static float position_step_test_adjust_tolerance(float value, int8 direction)
+{
+    value += POSITION_STEP_TEST_TOL_STEP * (float)direction;
+    if(value < POSITION_STEP_TEST_TOL_MIN) value = POSITION_STEP_TEST_TOL_MIN;
+    if(value > POSITION_STEP_TEST_TOL_MAX) value = POSITION_STEP_TEST_TOL_MAX;
     return value;
 }
 
@@ -514,9 +867,10 @@ static void position_step_test_start(void)
     position_step_test_clear_measurement();
     __enable_irq();
 
-    if(path_executor_start_with_distance(
+    if(path_executor_start_with_distance_and_tolerance(
            &s_position_step_solution,
-           s_position_step_cell_distance) == 0u)
+           s_position_step_cell_distance,
+           s_position_step_tolerance) == 0u)
     {
         __disable_irq();
         s_position_step_diag_active = 0u;
@@ -533,6 +887,7 @@ void position_step_test_init(void)
     s_position_step_direction_index = 3u;
     s_position_step_cell_count = POSITION_STEP_TEST_CELL_DEFAULT;
     s_position_step_cell_distance = POSITION_STEP_TEST_DIST_DEFAULT;
+    s_position_step_tolerance = POSITION_STEP_TEST_TOL_DEFAULT;
     s_position_step_diag_active = 0u;
     s_position_step_aborted = 0u;
     s_position_step_wait_release = 1u;
@@ -607,6 +962,12 @@ void position_step_test_process_keys(void)
                 position_step_test_adjust_distance(
                     s_position_step_cell_distance, direction);
         }
+        else if(s_position_step_item == POSITION_STEP_TEST_ITEM_TOLERANCE)
+        {
+            s_position_step_tolerance =
+                position_step_test_adjust_tolerance(
+                    s_position_step_tolerance, direction);
+        }
         else if((s_position_step_item == POSITION_STEP_TEST_ITEM_RUN) &&
                 (direction > 0))
         {
@@ -657,9 +1018,10 @@ void position_step_test_screen_init(void)
     ips200_show_string(0,  16, "ITEM");
     ips200_show_string(112,16, "STATE");
     ips200_show_string(0,  32, "DIR");
+    ips200_show_string(112,32, "FF");
     ips200_show_string(0,  48, "CELLS");
     ips200_show_string(112,48, "DIST");
-    ips200_show_string(0,  64, "TOTAL/FF");
+    ips200_show_string(0,  64, "TOTAL/TOL");
     ips200_show_string(0,  80, "POS X/Y");
     ips200_show_string(0,  96, "TGT X/Y");
     ips200_show_string(0, 112, "ERR X/Y");
@@ -681,6 +1043,7 @@ void position_step_test_screen_update(void)
     uint8 direction_index;
     uint8 cell_count;
     float cell_distance;
+    float complete_tolerance;
     float total_target;
     float total_x;
     float total_y;
@@ -714,6 +1077,7 @@ void position_step_test_screen_update(void)
     direction_index = s_position_step_direction_index;
     cell_count = s_position_step_cell_count;
     cell_distance = s_position_step_cell_distance;
+    complete_tolerance = s_position_step_tolerance;
     total_x = s_position_step_total_x;
     total_y = s_position_step_total_y;
     target_x = path_executor_get_target_x();
@@ -743,6 +1107,8 @@ void position_step_test_screen_update(void)
             ips200_show_string(40, 16, "CELL"); break;
         case POSITION_STEP_TEST_ITEM_DISTANCE:
             ips200_show_string(40, 16, "DIST"); break;
+        case POSITION_STEP_TEST_ITEM_TOLERANCE:
+            ips200_show_string(40, 16, "TOL "); break;
         case POSITION_STEP_TEST_ITEM_RUN:
             ips200_show_string(40, 16, "RUN "); break;
         default:
@@ -790,11 +1156,12 @@ void position_step_test_screen_update(void)
         default: ips200_show_string(32, 32, "INVALID "); break;
     }
 
+    ips200_show_float(144, 32, deadzone_min_ratio, 5, 2);
     ips200_show_uint(48, 48, cell_count, 2);
     ips200_show_float(152, 48, cell_distance,       5, 1);
     ips200_show_float(72,  64, total_target,        6, 1);
     ips200_show_string(128, 64, "/");
-    ips200_show_float(144, 64, deadzone_min_ratio,  5, 2);
+    ips200_show_float(144, 64, complete_tolerance,  5, 1);
     ips200_show_float(64,  80, total_x,             6, 2);
     ips200_show_string(120, 80, "/");
     ips200_show_float(136, 80, total_y,             6, 2);

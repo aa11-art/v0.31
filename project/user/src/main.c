@@ -11,7 +11,7 @@ extern volatile int photo_data[12][16];
 
 extern volatile uint32_t camera_frame_sequence;
 
-#if !POSITION_STEP_TEST_MODE && !GYRO_SPEED_TUNE_MODE
+#if !POSITION_STEP_TEST_MODE && !GYRO_SPEED_TUNE_MODE && !WHEEL_SPEED_TUNE_MODE
 static uint8_t debug_screen_tick = 0u;
 
 static void debug_screen_init(void)
@@ -29,10 +29,10 @@ static void debug_screen_init(void)
     ips200_show_string(0, 128, "ENC_VY");
     ips200_show_string(0, 144, "PROGRESS");
     ips200_show_string(0, 160, "CAM_SEQ");
-    ips200_show_string(0, 176, "BLAST");
-    ips200_show_string(0, 192, "LABEL");
+    ips200_show_string(0, 176, "BLAST/PS");
+    ips200_show_string(0, 192, "LABEL/PV/PC");
     ips200_show_string(0, 208, "LEVEL/RESULT");
-    ips200_show_string(0, 224, "MAP/HOLD/FATAL");
+    ips200_show_string(0, 224, "MAP/HOLD/FATAL/PF");
 }
 
 static void debug_screen_update(void)
@@ -53,8 +53,11 @@ static void debug_screen_update(void)
     uint16_t path_count;
 
     uint32_t camera_sequence;
+    uint32_t pose_sequence;
     uint8_t blast_index;
     uint8_t blast_count;
+    uint8_t pose_valid;
+    uint8_t pose_confidence;
 
     /*
      * 主循环约10ms执行一次，每10次刷新一次屏幕，
@@ -84,6 +87,9 @@ static void debug_screen_update(void)
     debug_target_vy = target_vy;
 
     camera_sequence = camera_frame_sequence;
+    pose_sequence = camera_pose_sequence;
+    pose_valid = camera_pose_valid;
+    pose_confidence = camera_pose_confidence;
     path_index = path_executor_get_step_index();
     path_count = path_executor_get_move_count();
 
@@ -121,7 +127,13 @@ static void debug_screen_update(void)
     ips200_show_uint(96, 176, blast_index, 1);
     ips200_show_string(112, 176, "/");
     ips200_show_uint(128, 176, blast_count, 1);
+    ips200_show_string(144, 176, "/");
+    ips200_show_uint(160, 176, pose_sequence, 10);
     ips200_show_uint(96, 192, label, 2);
+    ips200_show_string(120, 192, "/");
+    ips200_show_uint(128, 192, pose_valid, 1);
+    ips200_show_string(144, 192, "/");
+    ips200_show_uint(152, 192, pose_confidence, 3);
     ips200_show_uint(112, 208, mission_controller_get_level(), 1);
     ips200_show_string(128, 208, "/");
     ips200_show_uint(144, 208, mission_controller_get_level_result(), 1);
@@ -131,6 +143,8 @@ static void debug_screen_update(void)
         mission_controller_get_abort_hold_remaining_10ms(), 3);
     ips200_show_string(192, 224, "/");
     ips200_show_uint(208, 224, mission_controller_get_fatal_fault(), 1);
+    ips200_show_string(224, 224, "/");
+    ips200_show_uint(232, 224, path_executor_get_fault_reason(), 1);
 }
 #endif
 
@@ -138,12 +152,16 @@ int main(void)
 {
     clock_init(SYSTEM_CLOCK_600M);  
    debug_init(); 
+#if !WHEEL_SPEED_TUNE_MODE && !GYRO_SPEED_TUNE_MODE
     UART_init();
     label_uart_init();
+#endif
     system_delay_ms(1000); 
 
     ips200_init(IPS200_TYPE_SPI); 
-#if POSITION_STEP_TEST_MODE
+#if WHEEL_SPEED_TUNE_MODE
+    wheel_speed_tune_screen_init();
+#elif POSITION_STEP_TEST_MODE
     position_step_test_screen_init();
 #elif GYRO_SPEED_TUNE_MODE
     gyro_speed_tune_screen_init();
@@ -153,13 +171,15 @@ int main(void)
     encoder_init();
     key_init(10);
     mecanum_pid_init();
+#if !WHEEL_SPEED_TUNE_MODE
     imu_init();
+#endif
 
-//    wireless_uart_init();
-
+#if !WHEEL_SPEED_TUNE_MODE && !GYRO_SPEED_TUNE_MODE
     camera_sokoban_init();
     path_executor_init();
-	
+#endif
+	    wireless_uart_init();
 //电机初始化
                                 
     gpio_init(MOTOR1_DIR, GPO, 0, GPO_PUSH_PULL);                            // GPIO 初始化为输出 默认上拉输出高
@@ -171,27 +191,35 @@ int main(void)
     pwm_init(MOTOR3_PWM, 17000, 0); 
     gpio_init(MOTOR4_DIR, GPO, 0, GPO_PUSH_PULL);                           
     pwm_init(MOTOR4_PWM, 17000, 0);
+#if !WHEEL_SPEED_TUNE_MODE && !GYRO_SPEED_TUNE_MODE
     mission_controller_init();
+#endif
 
-#if POSITION_STEP_TEST_MODE
+#if WHEEL_SPEED_TUNE_MODE
+    wheel_speed_tune_init();
+#elif POSITION_STEP_TEST_MODE
     position_step_test_init();
 #elif GYRO_SPEED_TUNE_MODE
     gyro_speed_tune_init();
 #endif
 
     pit_ms_init(PIT_CH0, 10);
+#if !WHEEL_SPEED_TUNE_MODE
     pit_ms_init(PIT_CH1, 1);
-    pit_ms_init(PIT_CH2, 10);		
-    char buffer[100];
+#endif
+#if !WHEEL_SPEED_TUNE_MODE && !GYRO_SPEED_TUNE_MODE
+    pit_ms_init(PIT_CH2, 10);
+#endif
+    char buffer[128];
 //		ips200_clear();
 //自用屏幕显示
   
     while(1)
     {
         system_delay_ms(10);
-    //    sprintf(&buffer[0],"%d,%d,%d,%d,%f,%f,%f,%f,%f,%f\n",encoder_fl,encoder_fr,encoder_bl,encoder_br,
-    //                                                   pwm_fl,pwm_fr,pwm_bl,pwm_br,yaw,(encoder_fl + encoder_fr + encoder_bl + encoder_br) / 4.0f);
-    //    wireless_uart_send_string(buffer);
+       sprintf(&buffer[0],"%d,%d,%d,%d,%f,%f,%f,%f,%f,%f\n",encoder_fl,encoder_fr,encoder_bl,encoder_br,
+                                                      pwm_fl,pwm_fr,pwm_bl,pwm_br,yaw,(encoder_fl + encoder_fr + encoder_bl + encoder_br) / 4.0f);
+       wireless_uart_send_string(buffer);
 
 
 
@@ -212,7 +240,10 @@ int main(void)
 //    }
 //    printf("#\n"); // VOFA结束标识符
 
-#if POSITION_STEP_TEST_MODE
+#if WHEEL_SPEED_TUNE_MODE
+        wheel_speed_tune_process_keys();
+        wheel_speed_tune_screen_update();
+#elif POSITION_STEP_TEST_MODE
         position_step_test_process_keys();
         position_step_test_screen_update();
 #elif GYRO_SPEED_TUNE_MODE

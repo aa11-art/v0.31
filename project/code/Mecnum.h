@@ -60,6 +60,7 @@ void move_forward_distance(float distance);
 void move_lateral_distance(float distance);
 void get_encoder_total();
 void MecanumSpeedPidReset(void);
+void MecanumSetWheelSpeedPidGains(uint8 index, float kp, float ki, float kd);
 void MecanumSetSpeedDeadzoneMinRatio(float ratio);
 float MecanumGetSpeedDeadzoneMinRatio(void);
 #endif

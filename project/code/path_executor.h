@@ -14,8 +14,13 @@ typedef enum
 
 void path_executor_init(void);
 void path_executor_abort(void);
+uint8_t path_executor_clear_carry_error(void);
 uint8_t path_executor_start(const sokoban_solution_t *solution);
 uint8_t path_executor_start_with_distance(const sokoban_solution_t *solution, float step_distance);
+uint8_t path_executor_start_with_distance_and_tolerance(
+    const sokoban_solution_t *solution,
+    float step_distance,
+    float complete_tolerance);
 uint8_t path_executor_start_body_step(sokoban_body_direction_t direction);
 uint8_t path_executor_start_body_step_with_distance(sokoban_body_direction_t direction,
                                                     float step_distance);

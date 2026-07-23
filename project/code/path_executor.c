@@ -5,14 +5,10 @@
 
 // 路径执行器相关宏定义
 #define PATH_EXECUTOR_DT_S            (0.01f)     //时间步长（秒）
-#define PATH_EXECUTOR_CELL_DISTANCE  (24.0f)      // 每个单元格的距离
-#define PATH_EXECUTOR_COMPLETE_TOL   (0.8f)       // 完成容差
+#define PATH_EXECUTOR_CELL_DISTANCE  (22.0f)      // 每个单元格的距离
+#define PATH_EXECUTOR_COMPLETE_TOL   (1.0f)       // 完成容差
 #define PATH_EXECUTOR_CROSS_AXIS_TOL (0.5f)       // 非运动轴完成容差
-#define PATH_EXECUTOR_CORRECT_RATIO  (0.5f)       // 回拉运动轴停止容差比例
-#define PATH_EXECUTOR_CORRECT_CROSS  (0.3f)       // 回拉非运动轴停止容差
-#define PATH_EXECUTOR_COMPLETE_TICKS (8.0f)         // 连续到位 ticks 数
 #define PATH_EXECUTOR_SETTLE_TICKS   (5u)         // 稳定 ticks 数
-#define PATH_EXECUTOR_RETRY_TICKS    (2u)         // 超差回调确认 ticks 数
 #define PATH_EXECUTOR_SETTLE_SPEED   (2.0f)       // 车体停稳速度阈值
 #define PATH_EXECUTOR_SETTLE_YAW     (2.0f)       // 停稳航向误差
 #define PATH_EXECUTOR_SETTLE_RATE    (3.0f)       // 停稳角速度
@@ -58,10 +54,7 @@ static float s_step_target_y = 0.0f;                                 // 单步Y�
 static float s_step_distance = PATH_EXECUTOR_CELL_DISTANCE;          // 步骤距离
 static float s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL; // 运动轴完成容差
 static volatile uint32_t s_step_elapsed_ticks = 0u;                  // 连续段运行 ticks 数
-static volatile uint8_t s_complete_ticks = 0u;                       // 连续到位 ticks 数
 static volatile uint8_t s_settle_ticks = 0u;                         // 稳定ticks计数
-static volatile uint8_t s_settle_retry_ticks = 0u;                   // 超差回调计数
-static volatile uint8_t s_correction_active = 0u;                    // 正在执行位置回拉
 static path_step_axis_t s_step_axis = PATH_AXIS_VX;                  // 当前轴
 static volatile sokoban_direction_t s_heading = SOKOBAN_DIR_RIGHT;
 
@@ -77,7 +70,6 @@ static void path_executor_enter_fault(path_executor_fault_reason_t reason)
 {
     s_carry_error_x = 0.0f;
     s_carry_error_y = 0.0f;
-    s_correction_active = 0u;
     s_step_cell_count = 1u;
     s_fault_reason = reason;
     path_executor_stop_motion();
@@ -123,25 +115,25 @@ static uint8_t path_executor_body_settled(float measured_vx,
                      (fabsf(Gyro.x) <= PATH_EXECUTOR_SETTLE_RATE));
 }
 
-static uint8_t path_executor_within_tolerance(float error_x,
-                                               float error_y,
-                                               float motion_tolerance,
-                                               float cross_tolerance,
-                                               uint8_t *within_x,
-                                               uint8_t *within_y)
+static uint8_t path_executor_motion_reached(float error_x,
+                                             float error_y,
+                                             uint8_t *within_x,
+                                             uint8_t *within_y)
 {
     if(s_step_axis == PATH_AXIS_VX)
     {
-        *within_x = (uint8_t)(fabsf(error_x) <= motion_tolerance);
-        *within_y = (uint8_t)(fabsf(error_y) <= cross_tolerance);
-    }
-    else
-    {
-        *within_x = (uint8_t)(fabsf(error_x) <= cross_tolerance);
-        *within_y = (uint8_t)(fabsf(error_y) <= motion_tolerance);
+        *within_x = (uint8_t)(fabsf(error_x) <=
+                              s_step_complete_tolerance);
+        *within_y = (uint8_t)(fabsf(error_y) <=
+                              PATH_EXECUTOR_CROSS_AXIS_TOL);
+        return *within_x;
     }
 
-    return (uint8_t)(*within_x && *within_y);
+    *within_x = (uint8_t)(fabsf(error_x) <=
+                          PATH_EXECUTOR_CROSS_AXIS_TOL);
+    *within_y = (uint8_t)(fabsf(error_y) <=
+                          s_step_complete_tolerance);
+    return *within_y;
 }
 
 static uint8_t path_executor_prepare_body_step(sokoban_body_direction_t body_direction)
@@ -153,10 +145,7 @@ static uint8_t path_executor_prepare_body_step(sokoban_body_direction_t body_dir
     s_step_target_x = s_carry_error_x;
     s_step_target_y = s_carry_error_y;
     s_step_elapsed_ticks = 0u;
-    s_complete_ticks = 0u;
     s_settle_ticks = 0u;
-    s_settle_retry_ticks = 0u;
-    s_correction_active = 0u;
     s_settle_elapsed_ticks = 0u;
 
     switch(body_direction)
@@ -213,10 +202,7 @@ void path_executor_init(void)
     s_step_distance = PATH_EXECUTOR_CELL_DISTANCE;
     s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
     s_step_elapsed_ticks = 0u;
-    s_complete_ticks = 0u;
     s_settle_ticks = 0u;
-    s_settle_retry_ticks = 0u;
-    s_correction_active = 0u;
     s_settle_elapsed_ticks = 0u;
     s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     s_step_axis = PATH_AXIS_VX;
@@ -241,15 +227,28 @@ void path_executor_abort(void)
     s_carry_error_y = 0.0f;
     s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
     s_step_elapsed_ticks = 0u;
-    s_complete_ticks = 0u;
     s_settle_ticks = 0u;
-    s_settle_retry_ticks = 0u;
-    s_correction_active = 0u;
     s_settle_elapsed_ticks = 0u;
     s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     path_executor_stop_motion();
     MecanumSpeedPidReset();
     __enable_irq();
+}
+
+uint8_t path_executor_clear_carry_error(void)
+{
+    __disable_irq();
+    if((s_state != PATH_EXECUTOR_IDLE) &&
+       (s_state != PATH_EXECUTOR_DONE) &&
+       (s_state != PATH_EXECUTOR_FAULT))
+    {
+        __enable_irq();
+        return 0u;
+    }
+    s_carry_error_x = 0.0f;
+    s_carry_error_y = 0.0f;
+    __enable_irq();
+    return 1u;
 }
 
 uint8_t path_executor_start_body_step(sokoban_body_direction_t direction)
@@ -306,12 +305,14 @@ uint8_t path_executor_start_body_step_with_distance_and_tolerance(
 }
 
 static uint8_t path_executor_start_internal(const sokoban_solution_t *solution,
-                                            float step_distance)
+                                            float step_distance,
+                                            float complete_tolerance)
 {
     uint16_t idx;
 
     if((solution == 0) || (solution->solved == 0u) ||
-       (solution->move_count == 0u) || (step_distance <= 0.0f))
+       (solution->move_count == 0u) || (step_distance <= 0.0f) ||
+       (complete_tolerance <= 0.0f))
     {
         path_executor_stop_motion();
         return 0u;
@@ -337,12 +338,9 @@ static uint8_t path_executor_start_internal(const sokoban_solution_t *solution,
     s_step_target_x = 0.0f;
     s_step_target_y = 0.0f;
     s_step_distance = step_distance;
-    s_step_complete_tolerance = PATH_EXECUTOR_COMPLETE_TOL;
+    s_step_complete_tolerance = complete_tolerance;
     s_step_elapsed_ticks = 0u;
-    s_complete_ticks = 0u;
     s_settle_ticks = 0u;
-    s_settle_retry_ticks = 0u;
-    s_correction_active = 0u;
     s_settle_elapsed_ticks = 0u;
     s_fault_reason = PATH_EXECUTOR_FAULT_NONE;
     s_step_axis = PATH_AXIS_VX;
@@ -355,12 +353,23 @@ static uint8_t path_executor_start_internal(const sokoban_solution_t *solution,
 // 开始执行路径
 uint8_t path_executor_start(const sokoban_solution_t *solution)
 {
-    return path_executor_start_internal(solution, PATH_EXECUTOR_CELL_DISTANCE);
+    return path_executor_start_internal(solution, PATH_EXECUTOR_CELL_DISTANCE,
+                                        PATH_EXECUTOR_COMPLETE_TOL);
 }
 
 uint8_t path_executor_start_with_distance(const sokoban_solution_t *solution, float step_distance)
 {
-    return path_executor_start_internal(solution, step_distance);
+    return path_executor_start_internal(solution, step_distance,
+                                        PATH_EXECUTOR_COMPLETE_TOL);
+}
+
+uint8_t path_executor_start_with_distance_and_tolerance(
+    const sokoban_solution_t *solution,
+    float step_distance,
+    float complete_tolerance)
+{
+    return path_executor_start_internal(solution, step_distance,
+                                        complete_tolerance);
 }
 
 // 10ms 更新函数
@@ -373,9 +382,7 @@ void path_executor_update_10ms(void)
     float yaw_error;
     uint8_t within_tolerance_x;
     uint8_t within_tolerance_y;
-    uint8_t within_tolerance;
-    float motion_tolerance;
-    float cross_tolerance;
+    uint8_t motion_reached;
 
     switch(s_state)
     {
@@ -424,54 +431,31 @@ void path_executor_update_10ms(void)
 
             error_x = s_step_target_x - s_step_position_x;
             error_y = s_step_target_y - s_step_position_y;
-            motion_tolerance = s_step_complete_tolerance;
-            cross_tolerance = PATH_EXECUTOR_CROSS_AXIS_TOL;
-            if(s_correction_active)
-            {
-                motion_tolerance *= PATH_EXECUTOR_CORRECT_RATIO;
-                cross_tolerance = PATH_EXECUTOR_CORRECT_CROSS;
-            }
-            within_tolerance = path_executor_within_tolerance(
-                error_x, error_y, motion_tolerance, cross_tolerance,
-                &within_tolerance_x, &within_tolerance_y);
+            motion_reached = path_executor_motion_reached(
+                error_x, error_y, &within_tolerance_x, &within_tolerance_y);
 
-            if(within_tolerance)
+            if(motion_reached)
             {
                 path_executor_stop_motion();
-                if(s_correction_active)
-                {
-                    s_complete_ticks = (uint8_t)PATH_EXECUTOR_COMPLETE_TICKS;
-                }
-                else
-                {
-                    s_complete_ticks++;
-                }
+                s_settle_ticks = 0u;
+                s_settle_elapsed_ticks = 0u;
+                s_state = PATH_EXECUTOR_SETTLE;
+                MecanumSpeedPidReset();
             }
             else
             {
-                s_complete_ticks = 0u;
                 PositionControl(s_step_target_x,
                                 s_step_target_y,
                                 s_step_position_x,
                                 s_step_position_y);
                 if(within_tolerance_x) target_vx = 0.0f;
                 if(within_tolerance_y) target_vy = 0.0f;
-            }
-
-            if(s_complete_ticks >= PATH_EXECUTOR_COMPLETE_TICKS)
-            {
-                path_executor_stop_motion();
-                s_settle_ticks = 0u;
-                s_settle_retry_ticks = 0u;
-                s_correction_active = 0u;
-                s_settle_elapsed_ticks = 0u;
-                s_state = PATH_EXECUTOR_SETTLE;
-                MecanumSpeedPidReset();
-            }
-            else if(s_step_elapsed_ticks >=
-                    (uint32_t)PATH_EXECUTOR_TIMEOUT_TICKS * s_step_cell_count)
-            {
-                path_executor_enter_fault(PATH_EXECUTOR_FAULT_RUN_TIMEOUT);
+                if(s_step_elapsed_ticks >=
+                   (uint32_t)PATH_EXECUTOR_TIMEOUT_TICKS * s_step_cell_count)
+                {
+                    path_executor_enter_fault(
+                        PATH_EXECUTOR_FAULT_RUN_TIMEOUT);
+                }
             }
             break;
         }
@@ -486,64 +470,32 @@ void path_executor_update_10ms(void)
             s_step_position_y += measured_vy * PATH_EXECUTOR_DT_S;
             s_settle_elapsed_ticks++;
 
-            error_x = s_step_target_x - s_step_position_x;
-            error_y = s_step_target_y - s_step_position_y;
-            within_tolerance = path_executor_within_tolerance(
-                error_x, error_y, s_step_complete_tolerance,
-                PATH_EXECUTOR_CROSS_AXIS_TOL,
-                &within_tolerance_x, &within_tolerance_y);
-
-            if(!within_tolerance)
+            if(path_executor_body_settled(measured_vx, measured_vy, yaw_error))
             {
-                s_settle_ticks = 0u;
-                if(path_executor_translation_slow(measured_vx, measured_vy))
-                {
-                    s_settle_retry_ticks++;
-                }
-                else
-                {
-                    s_settle_retry_ticks = 0u;
-                }
-
-                if(s_settle_retry_ticks >= PATH_EXECUTOR_RETRY_TICKS)
-                {
-                    s_complete_ticks = 0u;
-                    s_settle_ticks = 0u;
-                    s_settle_retry_ticks = 0u;
-                    s_correction_active = 1u;
-                    s_settle_elapsed_ticks = 0u;
-                    s_state = PATH_EXECUTOR_RUN_STEP;
-                    break;
-                }
+                s_settle_ticks++;
             }
             else
             {
-                s_settle_retry_ticks = 0u;
-                if(path_executor_body_settled(measured_vx, measured_vy, yaw_error))
+                s_settle_ticks = 0u;
+            }
+
+            if(s_settle_ticks >= PATH_EXECUTOR_SETTLE_TICKS)
+            {
+                error_x = s_step_target_x - s_step_position_x;
+                error_y = s_step_target_y - s_step_position_y;
+                s_carry_error_x = error_x;
+                s_carry_error_y = error_y;
+                s_step_index = (uint16_t)(s_step_index +
+                                          s_step_cell_count);
+                if(s_step_index >= s_move_count)
                 {
-                    s_settle_ticks++;
+                    s_state = PATH_EXECUTOR_DONE;
                 }
                 else
                 {
-                    s_settle_ticks = 0u;
+                    s_state = PATH_EXECUTOR_LOAD_STEP;
                 }
-
-                if(s_settle_ticks >= PATH_EXECUTOR_SETTLE_TICKS)
-                {
-                    s_carry_error_x = error_x;
-                    s_carry_error_y = error_y;
-                    s_step_index = (uint16_t)(s_step_index +
-                                              s_step_cell_count);
-                    if(s_step_index >= s_move_count)
-                    {
-                        s_state = PATH_EXECUTOR_DONE;
-                    }
-                    else
-                    {
-                        s_state = PATH_EXECUTOR_LOAD_STEP;
-                    }
-                    break;
-                }
+                break;
             }
 
             if(s_settle_elapsed_ticks >= PATH_EXECUTOR_SETTLE_TIMEOUT)
