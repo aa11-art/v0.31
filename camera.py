@@ -49,7 +49,8 @@ CAR_PAIR_MIN_DISTANCE = 0.10
 CAR_PAIR_MAX_DISTANCE = 1.20
 CAR_PAIR_AMBIGUITY_RATIO = 0.90
 CAR_PAIR_MIN_CONFIDENCE = 60
-CAR_MARKER_MAX_CELL_SIZE = 0.90
+CAR_MARKER_MAX_SPAN_CELL = 1.10
+CAR_MARKER_MAX_THICKNESS_CELL = 0.70
 CAR_TRACK_MAX_JUMP_CELL = 1.50
 CAR_TRACK_LOST_FRAMES = 15
 CAR_BODY_MIN_CELL_SIZE = 0.20
@@ -63,8 +64,8 @@ CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
     "box": (0, 100, -53, 127, 127, 49),
     "goal": (100, 0, 80, 127, 127, -128),
-    "car_head": (0, 100, -12, -128, -128, -13),
-    "car_tail": (63, 40, -128, -38, 127, -128),
+    "car_head": (70, 100, -60, -20, -45, -5),
+    "car_tail": (70, 100, -95, -54, 28, 85),
     "car_body": (0, 100, -44, -128, -128, 84),
     "road": (0, 100, -128, 80, -128, -57),
     "bomb": (0, 100, 26, 127, 127, -38),
@@ -298,8 +299,10 @@ def find_marker_candidates(img, threshold, name, color, map_roi,
     candidates = []
     cell_w = map_roi[2] / VISIBLE_COLS
     cell_h = map_roi[3] / VISIBLE_ROWS
-    max_w = cell_w * CAR_MARKER_MAX_CELL_SIZE
-    max_h = cell_h * CAR_MARKER_MAX_CELL_SIZE
+    max_span_w = cell_w * CAR_MARKER_MAX_SPAN_CELL
+    max_span_h = cell_h * CAR_MARKER_MAX_SPAN_CELL
+    max_thickness_w = cell_w * CAR_MARKER_MAX_THICKNESS_CELL
+    max_thickness_h = cell_h * CAR_MARKER_MAX_THICKNESS_CELL
     blobs = img.find_blobs(
         [threshold],
         roi=inner_map_roi(map_roi),
@@ -314,8 +317,11 @@ def find_marker_candidates(img, threshold, name, color, map_roi,
             result = "pixels_insufficient"
         elif blob.area() < CAR_MARKER_AREA_THRESHOLD:
             result = "area_insufficient"
-        elif blob.w() > max_w or blob.h() > max_h:
+        elif blob.w() > max_span_w or blob.h() > max_span_h:
             result = "too_large"
+        elif (blob.w() > max_thickness_w and
+              blob.h() > max_thickness_h):
+            result = "too_thick"
         elif not center_grid_in_map(center_grid):
             result = "out_of_map"
         else:
