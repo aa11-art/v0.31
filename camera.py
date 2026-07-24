@@ -35,6 +35,7 @@ car_debug = True
 DEBUG_PRINT_EVERY_N_FRAMES = 10
 DEBUG_PRINT_GRID = False
 DEBUG_DRAW_CAR = True
+DEBUG_PRINT_BODY_LAB = True
 ENABLE_UART = True
 UART_ID = 12
 UART_BAUD = 115200
@@ -242,6 +243,31 @@ def print_car_blob(name, index, blob, center_grid, cell_w, cell_h, result):
     print("%s[%d] rect=%s ratio=(%.2f,%.2f) pixels=%d area=%d grid=%s result=%s" %
           (name, index, str(blob.rect()), blob.w() / cell_w, blob.h() / cell_h,
            blob.pixels(), blob.area(), grid_text, result))
+def statistics_field(statistics, name):
+    value = getattr(statistics, name)
+    if callable(value):
+        return value()
+    return value
+def print_body_lab_grid(img, index, blob):
+    if not DEBUG_PRINT_BODY_LAB or blob.w() < 3 or blob.h() < 3:
+        return
+    cells = []
+    for row in range(3):
+        row_cells = []
+        y0 = blob.y() + (blob.h() * row) // 3
+        y1 = blob.y() + (blob.h() * (row + 1)) // 3
+        for col in range(3):
+            x0 = blob.x() + (blob.w() * col) // 3
+            x1 = blob.x() + (blob.w() * (col + 1)) // 3
+            statistics = img.get_statistics(
+                roi=(x0, y0, max(1, x1 - x0), max(1, y1 - y0)))
+            row_cells.append("(%d,%d,%d)" % (
+                statistics_field(statistics, "l_mean"),
+                statistics_field(statistics, "a_mean"),
+                statistics_field(statistics, "b_mean"),
+            ))
+        cells.append(",".join(row_cells))
+    print("body_lab[%d] 3x3=%s" % (index, "/".join(cells)))
 def reset_car_debug_overlay():
     global car_debug_rectangles
     global car_debug_lines
@@ -447,6 +473,8 @@ def find_car_body_candidates(img, map_roi, homography, debug):
         if result == "accepted":
             candidates.append((blob, center_grid))
     if debug:
+        for index in range(len(candidates)):
+            print_body_lab_grid(img, index, candidates[index][0])
         diagnostic_blobs = img.find_blobs(
             [THRESHOLDS["car_body"]],
             roi=inner_map_roi(map_roi),
