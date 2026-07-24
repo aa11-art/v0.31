@@ -50,7 +50,6 @@ CAR_PAIR_MAX_DISTANCE = 1.20
 CAR_PAIR_AMBIGUITY_RATIO = 0.90
 CAR_PAIR_MIN_CONFIDENCE = 60
 CAR_MARKER_MAX_SPAN_CELL = 1.10
-CAR_MARKER_MAX_THICKNESS_CELL = 0.70
 CAR_TRACK_MAX_JUMP_CELL = 1.50
 CAR_TRACK_LOST_FRAMES = 15
 CAR_BODY_MIN_CELL_SIZE = 0.20
@@ -78,8 +77,8 @@ BOX_PIXELS_THRESHOLD = 5
 BOX_AREA_THRESHOLD = 4
 CAR_PIXELS_THRESHOLD = 15
 CAR_AREA_THRESHOLD = 15
-CAR_MARKER_PIXELS_THRESHOLD = 3
-CAR_MARKER_AREA_THRESHOLD = 3
+CAR_MARKER_PIXELS_THRESHOLD = 10
+CAR_MARKER_AREA_THRESHOLD = 10
 BOMB_PIXELS_THRESHOLD = 10
 BOMB_AREA_THRESHOLD = 5
 def normalize_lab_threshold(threshold):
@@ -236,6 +235,8 @@ def blob_grid_center(blob, homography):
     return pixel_to_grid(blob.x() + blob.w() * 0.5,
                          blob.y() + blob.h() * 0.5,
                          homography)
+def marker_grid_center(blob, homography):
+    return pixel_to_grid(blob.cx(), blob.cy(), homography)
 def print_car_blob(name, index, blob, center_grid, cell_w, cell_h, result):
     if center_grid is None:
         grid_text = "none"
@@ -284,16 +285,6 @@ def draw_car_debug_overlay(img):
 def draw_blob(img, blob, color):
     if DEBUG_DRAW_CAR:
         car_debug_rectangles.append((blob.rect(), color))
-def blobs_overlap_too_much(left, right):
-    x0 = max(left.x(), right.x())
-    y0 = max(left.y(), right.y())
-    x1 = min(left.x() + left.w(), right.x() + right.w())
-    y1 = min(left.y() + left.h(), right.y() + right.h())
-    if x1 <= x0 or y1 <= y0:
-        return False
-    overlap = (x1 - x0) * (y1 - y0)
-    smaller = min(left.w() * left.h(), right.w() * right.h())
-    return overlap * 2 > smaller
 def find_marker_candidates(img, threshold, name, color, map_roi,
                            homography, debug):
     candidates = []
@@ -301,8 +292,6 @@ def find_marker_candidates(img, threshold, name, color, map_roi,
     cell_h = map_roi[3] / VISIBLE_ROWS
     max_span_w = cell_w * CAR_MARKER_MAX_SPAN_CELL
     max_span_h = cell_h * CAR_MARKER_MAX_SPAN_CELL
-    max_thickness_w = cell_w * CAR_MARKER_MAX_THICKNESS_CELL
-    max_thickness_h = cell_h * CAR_MARKER_MAX_THICKNESS_CELL
     blobs = img.find_blobs(
         [threshold],
         roi=inner_map_roi(map_roi),
@@ -312,16 +301,13 @@ def find_marker_candidates(img, threshold, name, color, map_roi,
     )
     for index in range(len(blobs)):
         blob = blobs[index]
-        center_grid = blob_grid_center(blob, homography)
+        center_grid = marker_grid_center(blob, homography)
         if blob.pixels() < CAR_MARKER_PIXELS_THRESHOLD:
             result = "pixels_insufficient"
         elif blob.area() < CAR_MARKER_AREA_THRESHOLD:
             result = "area_insufficient"
         elif blob.w() > max_span_w or blob.h() > max_span_h:
             result = "too_large"
-        elif (blob.w() > max_thickness_w and
-              blob.h() > max_thickness_h):
-            result = "too_thick"
         elif not center_grid_in_map(center_grid):
             result = "out_of_map"
         else:
@@ -343,10 +329,10 @@ def pair_continuity_distance_sq(center_x, center_y):
 def draw_pair(img, head, tail):
     if not DEBUG_DRAW_CAR:
         return
-    head_x = int(head.x() + head.w() * 0.5)
-    head_y = int(head.y() + head.h() * 0.5)
-    tail_x = int(tail.x() + tail.w() * 0.5)
-    tail_y = int(tail.y() + tail.h() * 0.5)
+    head_x = head.cx()
+    head_y = head.cy()
+    tail_x = tail.cx()
+    tail_y = tail.cy()
     center_x = (head_x + tail_x) // 2
     center_y = (head_y + tail_y) // 2
     car_debug_lines.append(
@@ -378,9 +364,7 @@ def find_car_pair(img, map_roi, homography, debug):
             center_y = (head_grid[1] + tail_grid[1]) * 0.5
             continuity_sq = pair_continuity_distance_sq(center_x, center_y)
             reason = "accepted"
-            if blobs_overlap_too_much(head, tail):
-                reason = "overlap"
-            elif distance_sq < min_distance_sq:
+            if distance_sq < min_distance_sq:
                 reason = "pair_too_close"
             elif distance_sq > max_distance_sq:
                 reason = "pair_too_far"
