@@ -8,6 +8,346 @@
 
 typedef enum
 {
+    WHEEL_SPEED_TUNE_WHEEL = 0,
+    WHEEL_SPEED_TUNE_KP,
+    WHEEL_SPEED_TUNE_KI,
+    WHEEL_SPEED_TUNE_KD,
+    WHEEL_SPEED_TUNE_RUN
+} wheel_speed_tune_item_t;
+
+#define WHEEL_SPEED_TUNE_ITEM_COUNT       (5u)
+#define WHEEL_SPEED_TUNE_WHEEL_COUNT      (4u)
+#define WHEEL_SPEED_TUNE_VX_TARGET        (80.0f)
+#define WHEEL_SPEED_TUNE_KP_STEP          (0.1f)
+#define WHEEL_SPEED_TUNE_KI_STEP          (0.05f)
+#define WHEEL_SPEED_TUNE_KD_STEP          (0.1f)
+#define WHEEL_SPEED_TUNE_GAIN_MIN         (0.0f)
+#define WHEEL_SPEED_TUNE_KP_MAX           (20.0f)
+#define WHEEL_SPEED_TUNE_KI_MAX           (5.0f)
+#define WHEEL_SPEED_TUNE_KD_MAX           (20.0f)
+#define WHEEL_SPEED_TUNE_TIMEOUT_10MS     (1000u)
+
+static volatile wheel_speed_tune_item_t s_wheel_speed_tune_item =
+    WHEEL_SPEED_TUNE_WHEEL;
+static volatile uint8 s_wheel_speed_tune_wheel = 0u;
+static volatile uint8 s_wheel_speed_tune_running = 0u;
+static volatile uint8 s_wheel_speed_tune_timed_out = 0u;
+static volatile float s_wheel_speed_tune_kp[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {8.0f, 8.0f, 8.0f, 8.0f};
+static volatile float s_wheel_speed_tune_ki[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {0.3f, 0.3f, 0.3f, 0.3f};
+static volatile float s_wheel_speed_tune_kd[WHEEL_SPEED_TUNE_WHEEL_COUNT] =
+    {0.0f, 0.0f, 0.0f, 0.0f};
+static volatile uint16 s_wheel_speed_tune_run_10ms = 0u;
+static uint8 s_wheel_speed_tune_wait_release = 1u;
+static uint8 s_wheel_speed_tune_screen_tick = 0u;
+
+static uint8 control_tune_any_key_pressed(void)
+{
+    return (uint8)((gpio_get_level(C14) == GPIO_LOW) ||
+                   (gpio_get_level(C13) == GPIO_LOW) ||
+                   (gpio_get_level(C12) == GPIO_LOW));
+}
+
+static float wheel_speed_tune_adjust(float value, float step,
+                                     float minimum, float maximum,
+                                     int8 direction)
+{
+    value += step * (float)direction;
+    if(value < minimum) value = minimum;
+    if(value > maximum) value = maximum;
+    if((minimum == 0.0f) && (value < step * 0.5f)) value = 0.0f;
+    return value;
+}
+
+static void wheel_speed_tune_apply_gain(uint8 wheel)
+{
+    MecanumSetWheelSpeedPidGains(wheel,
+                                s_wheel_speed_tune_kp[wheel],
+                                s_wheel_speed_tune_ki[wheel],
+                                s_wheel_speed_tune_kd[wheel]);
+}
+
+static void wheel_speed_tune_stop(uint8 timed_out)
+{
+    s_wheel_speed_tune_running = 0u;
+    s_wheel_speed_tune_timed_out = timed_out;
+    v_fL = 0.0f;
+    v_fR = 0.0f;
+    v_bL = 0.0f;
+    v_bR = 0.0f;
+    MecanumCarStop();
+}
+
+void wheel_speed_tune_init(void)
+{
+    uint8 wheel;
+
+    s_wheel_speed_tune_item = WHEEL_SPEED_TUNE_WHEEL;
+    s_wheel_speed_tune_wheel = 0u;
+    for(wheel = 0u; wheel < WHEEL_SPEED_TUNE_WHEEL_COUNT; wheel++)
+    {
+        s_wheel_speed_tune_kp[wheel] = 10.0f;
+        s_wheel_speed_tune_ki[wheel] = 1.0f;
+        s_wheel_speed_tune_kd[wheel] = 0.0f;
+        wheel_speed_tune_apply_gain(wheel);
+    }
+    s_wheel_speed_tune_run_10ms = 0u;
+    s_wheel_speed_tune_wait_release = 1u;
+    s_wheel_speed_tune_screen_tick = 0u;
+    wheel_speed_tune_stop(0u);
+}
+
+void wheel_speed_tune_process_keys(void)
+{
+    key_scanner();
+
+    if(s_wheel_speed_tune_running != 0u)
+    {
+        if(control_tune_any_key_pressed() != 0u)
+        {
+            __disable_irq();
+            wheel_speed_tune_stop(0u);
+            __enable_irq();
+            key_clear_all_state();
+            s_wheel_speed_tune_wait_release = 1u;
+        }
+        return;
+    }
+
+    if(s_wheel_speed_tune_wait_release != 0u)
+    {
+        if(control_tune_any_key_pressed() == 0u)
+        {
+            key_clear_all_state();
+            s_wheel_speed_tune_wait_release = 0u;
+        }
+        return;
+    }
+
+    if(key_get_state(KEY_2) == KEY_SHORT_PRESS)
+    {
+        s_wheel_speed_tune_item = (wheel_speed_tune_item_t)(
+            ((uint8)s_wheel_speed_tune_item + 1u) %
+            WHEEL_SPEED_TUNE_ITEM_COUNT);
+        key_clear_state(KEY_2);
+    }
+    else if((key_get_state(KEY_3) == KEY_SHORT_PRESS) ||
+            (key_get_state(KEY_4) == KEY_SHORT_PRESS))
+    {
+        int8 direction =
+            (key_get_state(KEY_3) == KEY_SHORT_PRESS) ? -1 : 1;
+
+        __disable_irq();
+        s_wheel_speed_tune_timed_out = 0u;
+        if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_WHEEL)
+        {
+            s_wheel_speed_tune_wheel = (uint8)(
+                (s_wheel_speed_tune_wheel +
+                 ((direction > 0) ? 1u :
+                  (WHEEL_SPEED_TUNE_WHEEL_COUNT - 1u))) %
+                WHEEL_SPEED_TUNE_WHEEL_COUNT);
+            MecanumSpeedPidReset();
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KP)
+        {
+            s_wheel_speed_tune_kp[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_kp[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KP_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KP_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KI)
+        {
+            s_wheel_speed_tune_ki[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_ki[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KI_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KI_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if(s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_KD)
+        {
+            s_wheel_speed_tune_kd[s_wheel_speed_tune_wheel] =
+                wheel_speed_tune_adjust(
+                s_wheel_speed_tune_kd[s_wheel_speed_tune_wheel],
+                WHEEL_SPEED_TUNE_KD_STEP,
+                WHEEL_SPEED_TUNE_GAIN_MIN, WHEEL_SPEED_TUNE_KD_MAX,
+                direction);
+            wheel_speed_tune_apply_gain(s_wheel_speed_tune_wheel);
+        }
+        else if((s_wheel_speed_tune_item == WHEEL_SPEED_TUNE_RUN) &&
+                (direction > 0))
+        {
+            s_wheel_speed_tune_run_10ms = 0u;
+            MecanumSpeedPidReset();
+            s_wheel_speed_tune_running = 1u;
+        }
+        __enable_irq();
+        key_clear_all_state();
+    }
+}
+
+void wheel_speed_tune_update_10ms(void)
+{
+    if(s_wheel_speed_tune_running != 0u)
+    {
+        if(s_wheel_speed_tune_run_10ms >=
+           WHEEL_SPEED_TUNE_TIMEOUT_10MS)
+        {
+            wheel_speed_tune_stop(1u);
+        }
+        else
+        {
+            s_wheel_speed_tune_run_10ms++;
+            v_fL = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_fR = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_bL = WHEEL_SPEED_TUNE_VX_TARGET;
+            v_bR = WHEEL_SPEED_TUNE_VX_TARGET;
+            MecanumMotorSpeedControl();
+        }
+    }
+    else
+    {
+        v_fL = 0.0f;
+        v_fR = 0.0f;
+        v_bL = 0.0f;
+        v_bR = 0.0f;
+        MecanumMotorSpeedControl();
+    }
+}
+
+void wheel_speed_tune_screen_init(void)
+{
+    ips200_clear();
+    ips200_show_string(0,   0, "WHEEL SPEED PID TUNE");
+    ips200_show_string(0,  16, "STATE/ITEM");
+    ips200_show_string(0,  32, "WHEEL");
+    ips200_show_string(0,  48, "VX TARGET");
+    ips200_show_string(0,  64, "KP");
+    ips200_show_string(0,  80, "KI");
+    ips200_show_string(0,  96, "KD");
+    ips200_show_string(0, 112, "WHL FB     ERR    PWM");
+    ips200_show_string(0, 128, " FL");
+    ips200_show_string(0, 144, " FR");
+    ips200_show_string(0, 160, " BL");
+    ips200_show_string(0, 176, " BR");
+    ips200_show_string(0, 192, "RUN SEC");
+    ips200_show_string(0, 208, "ALL K4:GO ANY:STOP");
+    ips200_show_string(0, 224, "K2:NEXT K3:- K4:+");
+}
+
+static void wheel_speed_tune_show_wheel(uint16 y, int feedback,
+                                        float target, float output)
+{
+    ips200_show_int(24, y, feedback, 6);
+    ips200_show_int(88, y, (int)(target - (float)feedback), 6);
+    ips200_show_int(152, y, (int)output, 6);
+}
+
+void wheel_speed_tune_screen_update(void)
+{
+    wheel_speed_tune_item_t item;
+    uint8 running;
+    uint8 timed_out;
+    uint8 wheel;
+    uint16 run_10ms;
+    float kp;
+    float ki;
+    float kd;
+    int fl;
+    int fr;
+    int bl;
+    int br;
+    float out_fl;
+    float out_fr;
+    float out_bl;
+    float out_br;
+    float active_target;
+
+    if(++s_wheel_speed_tune_screen_tick < 10u)
+    {
+        return;
+    }
+    s_wheel_speed_tune_screen_tick = 0u;
+
+    __disable_irq();
+    item = s_wheel_speed_tune_item;
+    running = s_wheel_speed_tune_running;
+    timed_out = s_wheel_speed_tune_timed_out;
+    wheel = s_wheel_speed_tune_wheel;
+    run_10ms = s_wheel_speed_tune_run_10ms;
+    kp = s_wheel_speed_tune_kp[wheel];
+    ki = s_wheel_speed_tune_ki[wheel];
+    kd = s_wheel_speed_tune_kd[wheel];
+    fl = encoder_fl;
+    fr = encoder_fr;
+    bl = encoder_bl;
+    br = encoder_br;
+    out_fl = pwm_fl;
+    out_fr = pwm_fr;
+    out_bl = pwm_bl;
+    out_br = pwm_br;
+    __enable_irq();
+
+    if(running != 0u)
+    {
+        ips200_show_string(96, 16, "RUN ");
+    }
+    else if(timed_out != 0u)
+    {
+        ips200_show_string(96, 16, "TIME");
+    }
+    else
+    {
+        ips200_show_string(96, 16, "STOP");
+    }
+
+    switch(item)
+    {
+        case WHEEL_SPEED_TUNE_WHEEL:  ips200_show_string(152, 16, "WHL "); break;
+        case WHEEL_SPEED_TUNE_KP:     ips200_show_string(152, 16, "KP  "); break;
+        case WHEEL_SPEED_TUNE_KI:     ips200_show_string(152, 16, "KI  "); break;
+        case WHEEL_SPEED_TUNE_KD:     ips200_show_string(152, 16, "KD  "); break;
+        case WHEEL_SPEED_TUNE_RUN:    ips200_show_string(152, 16, "RUN "); break;
+        default:                      ips200_show_string(152, 16, "ERR "); break;
+    }
+
+    switch(wheel)
+    {
+        case 0u: ips200_show_string(96, 32, "FL"); break;
+        case 1u: ips200_show_string(96, 32, "FR"); break;
+        case 2u: ips200_show_string(96, 32, "BL"); break;
+        case 3u: ips200_show_string(96, 32, "BR"); break;
+        default: ips200_show_string(96, 32, "??"); break;
+    }
+
+    ips200_show_float(96, 48, WHEEL_SPEED_TUNE_VX_TARGET, 7, 1);
+    ips200_show_float(96, 64, kp,     6, 1);
+    ips200_show_float(96, 80, ki,     6, 2);
+    ips200_show_float(96, 96, kd,     6, 1);
+
+    ips200_show_string(0, 128, (wheel == 0u) ? ">FL" : " FL");
+    ips200_show_string(0, 144, (wheel == 1u) ? ">FR" : " FR");
+    ips200_show_string(0, 160, (wheel == 2u) ? ">BL" : " BL");
+    ips200_show_string(0, 176, (wheel == 3u) ? ">BR" : " BR");
+    active_target = (running != 0u) ? WHEEL_SPEED_TUNE_VX_TARGET : 0.0f;
+    wheel_speed_tune_show_wheel(128, fl,
+        active_target, out_fl);
+    wheel_speed_tune_show_wheel(144, fr,
+        active_target, out_fr);
+    wheel_speed_tune_show_wheel(160, bl,
+        active_target, out_bl);
+    wheel_speed_tune_show_wheel(176, br,
+        active_target, out_br);
+    ips200_show_float(96, 192, (float)run_10ms * 0.01f, 6, 1);
+}
+
+typedef enum
+{
     GYRO_SPEED_TUNE_TARGET = 0,
     GYRO_SPEED_TUNE_YAW_KP,
     GYRO_SPEED_TUNE_RATE_KP,
@@ -43,9 +383,7 @@ static uint8 s_gyro_speed_tune_screen_tick = 0u;
 
 static uint8 gyro_speed_tune_any_key_pressed(void)
 {
-    return (uint8)((gpio_get_level(C14) == GPIO_LOW) ||
-                   (gpio_get_level(C13) == GPIO_LOW) ||
-                   (gpio_get_level(C12) == GPIO_LOW));
+    return control_tune_any_key_pressed();
 }
 
 static float gyro_speed_tune_adjust_gain(float value, int8 direction)
@@ -380,64 +718,185 @@ void gyro_speed_tune_screen_update(void)
     ips200_show_float(104, 192, peak_value,  7, 1);
 }
 
+#define POSITION_STEP_TEST_DT_S          (0.01f)
+#define POSITION_STEP_TEST_CELL_DEFAULT  (5u)
+#define POSITION_STEP_TEST_CELL_MAX      (10u)
+#define POSITION_STEP_TEST_DIST_DEFAULT  (22.0f)
+#define POSITION_STEP_TEST_DIST_STEP     (0.5f)
+#define POSITION_STEP_TEST_DIST_MIN      (15.0f)
+#define POSITION_STEP_TEST_DIST_MAX      (30.0f)
+#define POSITION_STEP_TEST_TOL_DEFAULT   (0.8f)
+#define POSITION_STEP_TEST_TOL_STEP      (0.1f)
+#define POSITION_STEP_TEST_TOL_MIN       (0.4f)
+#define POSITION_STEP_TEST_TOL_MAX       (2.0f)
+
 typedef enum
 {
-    POSITION_STEP_TUNE_DIRECTION = 0,
-    POSITION_STEP_TUNE_DISTANCE,
-    POSITION_STEP_TUNE_DEADZONE_MIN_RATIO,
-    POSITION_STEP_TUNE_RUN
-} position_step_tune_item_t;
+    POSITION_STEP_TEST_ITEM_DIRECTION = 0,
+    POSITION_STEP_TEST_ITEM_CELLS,
+    POSITION_STEP_TEST_ITEM_DISTANCE,
+    POSITION_STEP_TEST_ITEM_TOLERANCE,
+    POSITION_STEP_TEST_ITEM_RUN
+} position_step_test_item_t;
 
-#define POSITION_STEP_TUNE_ITEM_COUNT       (4u)
-#define POSITION_STEP_TUNE_DISTANCE_DEFAULT (24.0f)
-#define POSITION_STEP_TUNE_DISTANCE_STEP    (0.5f)
-#define POSITION_STEP_TUNE_DISTANCE_MIN     (0.5f)
-#define POSITION_STEP_TUNE_DISTANCE_MAX     (5.0f)
-#define POSITION_STEP_TUNE_DEADZONE_RATIO_STEP (0.05f)
-#define POSITION_STEP_TUNE_DEADZONE_RATIO_MIN  (0.0f)
-#define POSITION_STEP_TUNE_DEADZONE_RATIO_MAX  (1.0f)
+#define POSITION_STEP_TEST_ITEM_COUNT (5u)
 
-static const sokoban_body_direction_t s_position_step_directions[4] =
-{
-    SOKOBAN_BODY_FORWARD,
-    SOKOBAN_BODY_BACKWARD,
-    SOKOBAN_BODY_LEFT,
-    SOKOBAN_BODY_RIGHT
-};
-static volatile position_step_tune_item_t s_position_step_item =
-    POSITION_STEP_TUNE_DIRECTION;
-static volatile uint8 s_position_step_direction_index = 0u;
-static volatile float s_position_step_distance =
-    POSITION_STEP_TUNE_DISTANCE_DEFAULT;
-static uint8 s_position_step_wait_release = 0u;
+static const char s_position_step_moves[4] = {'U', 'D', 'L', 'R'};
+static sokoban_solution_t s_position_step_solution;
+static volatile position_step_test_item_t s_position_step_item =
+    POSITION_STEP_TEST_ITEM_DIRECTION;
+static volatile uint8 s_position_step_direction_index = 3u;
+static volatile uint8 s_position_step_cell_count =
+    POSITION_STEP_TEST_CELL_DEFAULT;
+static volatile float s_position_step_cell_distance =
+    POSITION_STEP_TEST_DIST_DEFAULT;
+static volatile float s_position_step_tolerance =
+    POSITION_STEP_TEST_TOL_DEFAULT;
+static volatile uint8 s_position_step_diag_active = 0u;
+static volatile uint8 s_position_step_aborted = 0u;
+static volatile float s_position_step_total_x = 0.0f;
+static volatile float s_position_step_total_y = 0.0f;
+static volatile float s_position_step_start_yaw = 0.0f;
+static volatile float s_position_step_yaw_delta = 0.0f;
+static volatile float s_position_step_yaw_peak = 0.0f;
+static uint8 s_position_step_wait_release = 1u;
 static uint8 s_position_step_screen_tick = 0u;
 
-static float position_step_test_adjust(float value, float step,
-                                       float minimum, float maximum,
-                                       int8 direction)
+static float position_step_test_normalize_yaw(float angle)
 {
-    value += step * (float)direction;
-    if(value < minimum) value = minimum;
-    if(value > maximum) value = maximum;
+    if(angle > 180.0f) angle -= 360.0f;
+    if(angle < -180.0f) angle += 360.0f;
+    return angle;
+}
+
+static void position_step_test_clear_measurement(void)
+{
+    s_position_step_total_x = 0.0f;
+    s_position_step_total_y = 0.0f;
+    s_position_step_yaw_delta = 0.0f;
+    s_position_step_yaw_peak = 0.0f;
+}
+
+static float position_step_test_adjust_distance(float value, int8 direction)
+{
+    value += POSITION_STEP_TEST_DIST_STEP * (float)direction;
+    if(value < POSITION_STEP_TEST_DIST_MIN) value = POSITION_STEP_TEST_DIST_MIN;
+    if(value > POSITION_STEP_TEST_DIST_MAX) value = POSITION_STEP_TEST_DIST_MAX;
     return value;
 }
 
-static void position_step_test_reset_control(void)
+static float position_step_test_adjust_tolerance(float value, int8 direction)
 {
+    value += POSITION_STEP_TEST_TOL_STEP * (float)direction;
+    if(value < POSITION_STEP_TEST_TOL_MIN) value = POSITION_STEP_TEST_TOL_MIN;
+    if(value > POSITION_STEP_TEST_TOL_MAX) value = POSITION_STEP_TEST_TOL_MAX;
+    return value;
+}
+
+static void position_step_test_build_route(void)
+{
+    uint16 index;
+
+    (void)memset(&s_position_step_solution, 0,
+                 sizeof(s_position_step_solution));
+    for(index = 0u; index < s_position_step_cell_count; index++)
+    {
+        s_position_step_solution.move_seq[index] =
+            s_position_step_moves[s_position_step_direction_index];
+    }
+    s_position_step_solution.move_seq[index] = '\0';
+    s_position_step_solution.move_count = index;
+    s_position_step_solution.solved = 1u;
+}
+
+static void position_step_test_diag_update(void)
+{
+    float measured_vx;
+    float measured_vy;
+    float yaw_delta;
+
+    if(s_position_step_diag_active == 0u)
+    {
+        return;
+    }
+
+    measured_vx = (float)(
+        encoder_fl + encoder_fr + encoder_bl + encoder_br) / 4.0f;
+    measured_vy = (float)(
+        -encoder_fl + encoder_fr + encoder_bl - encoder_br) / 4.0f;
+    s_position_step_total_x += measured_vx * POSITION_STEP_TEST_DT_S;
+    s_position_step_total_y += measured_vy * POSITION_STEP_TEST_DT_S;
+
+    yaw_delta = position_step_test_normalize_yaw(
+        yaw - s_position_step_start_yaw);
+    s_position_step_yaw_delta = yaw_delta;
+    if(fabsf(yaw_delta) > fabsf(s_position_step_yaw_peak))
+    {
+        s_position_step_yaw_peak = yaw_delta;
+    }
+}
+
+static void position_step_test_abort_run(void)
+{
+    path_executor_abort();
+    __disable_irq();
+    s_position_step_diag_active = 0u;
+    s_position_step_aborted = 1u;
+    __enable_irq();
     MecanumCarStop();
+    s_position_step_wait_release = 1u;
+}
+
+static void position_step_test_start(void)
+{
+    float start_yaw;
+
+    position_step_test_build_route();
+    path_executor_abort();
+    MecanumCarStop();
+    MecanumSetSpeedDeadzoneMinRatio(
+        WHEEL_SPEED_LATERAL_DEADZONE_MIN_RATIO_DEFAULT);
+    path_executor_set_heading(SOKOBAN_DIR_UP);
+
+    __disable_irq();
+    start_yaw = yaw;
+    target_yaw = start_yaw;
+    s_position_step_start_yaw = start_yaw;
+    s_position_step_diag_active = 1u;
+    s_position_step_aborted = 0u;
+    position_step_test_clear_measurement();
+    __enable_irq();
+
+    if(path_executor_start_with_distance_and_tolerance(
+           &s_position_step_solution,
+           s_position_step_cell_distance,
+           s_position_step_tolerance) == 0u)
+    {
+        __disable_irq();
+        s_position_step_diag_active = 0u;
+        s_position_step_aborted = 1u;
+        __enable_irq();
+        MecanumCarStop();
+    }
+    s_position_step_wait_release = 1u;
 }
 
 void position_step_test_init(void)
 {
-    s_position_step_item = POSITION_STEP_TUNE_DIRECTION;
-    s_position_step_direction_index = 0u;
-    s_position_step_distance = POSITION_STEP_TUNE_DISTANCE_DEFAULT;
-    s_position_step_wait_release = 0u;
+    s_position_step_item = POSITION_STEP_TEST_ITEM_DIRECTION;
+    s_position_step_direction_index = 3u;
+    s_position_step_cell_count = POSITION_STEP_TEST_CELL_DEFAULT;
+    s_position_step_cell_distance = POSITION_STEP_TEST_DIST_DEFAULT;
+    s_position_step_tolerance = POSITION_STEP_TEST_TOL_DEFAULT;
+    s_position_step_diag_active = 0u;
+    s_position_step_aborted = 0u;
+    s_position_step_wait_release = 1u;
     s_position_step_screen_tick = 0u;
+    position_step_test_clear_measurement();
     path_executor_abort();
-    target_yaw = 0.0f;
-    position_step_test_reset_control();
-    MecanumMotorSpeedControl();
+    MecanumSetSpeedDeadzoneMinRatio(
+        WHEEL_SPEED_LATERAL_DEADZONE_MIN_RATIO_DEFAULT);
+    MecanumCarStop();
 }
 
 void position_step_test_process_keys(void)
@@ -445,6 +904,16 @@ void position_step_test_process_keys(void)
     uint8 start_requested = 0u;
 
     key_scanner();
+
+    if(path_executor_is_idle() == 0u)
+    {
+        if(gyro_speed_tune_any_key_pressed() != 0u)
+        {
+            position_step_test_abort_run();
+            key_clear_all_state();
+        }
+        return;
+    }
 
     if(s_position_step_wait_release != 0u)
     {
@@ -456,125 +925,142 @@ void position_step_test_process_keys(void)
         return;
     }
 
-    if(path_executor_is_idle() == 0u)
-    {
-        if(gyro_speed_tune_any_key_pressed() != 0u)
-        {
-            path_executor_abort();
-            __disable_irq();
-            position_step_test_reset_control();
-            __enable_irq();
-            key_clear_all_state();
-            s_position_step_wait_release = 1u;
-        }
-        return;
-    }
-
     if(key_get_state(KEY_2) == KEY_SHORT_PRESS)
     {
-        s_position_step_item = (position_step_tune_item_t)(
+        s_position_step_item = (position_step_test_item_t)(
             ((uint8)s_position_step_item + 1u) %
-            POSITION_STEP_TUNE_ITEM_COUNT);
-        key_clear_state(KEY_2);
+            POSITION_STEP_TEST_ITEM_COUNT);
     }
     else if((key_get_state(KEY_3) == KEY_SHORT_PRESS) ||
             (key_get_state(KEY_4) == KEY_SHORT_PRESS))
     {
-        int8 direction = (key_get_state(KEY_3) == KEY_SHORT_PRESS) ? -1 : 1;
+        int8 direction =
+            (key_get_state(KEY_3) == KEY_SHORT_PRESS) ? -1 : 1;
 
         __disable_irq();
-        if(s_position_step_item == POSITION_STEP_TUNE_DIRECTION)
+        if(s_position_step_item == POSITION_STEP_TEST_ITEM_DIRECTION)
         {
             s_position_step_direction_index = (uint8)(
                 (s_position_step_direction_index +
                  ((direction > 0) ? 1u : 3u)) % 4u);
         }
-        else if(s_position_step_item == POSITION_STEP_TUNE_DISTANCE)
+        else if(s_position_step_item == POSITION_STEP_TEST_ITEM_CELLS)
         {
-            s_position_step_distance = position_step_test_adjust(
-                s_position_step_distance,
-                POSITION_STEP_TUNE_DISTANCE_STEP,
-                POSITION_STEP_TUNE_DISTANCE_MIN,
-                POSITION_STEP_TUNE_DISTANCE_MAX,
-                direction);
+            if((direction < 0) && (s_position_step_cell_count > 1u))
+            {
+                s_position_step_cell_count--;
+            }
+            else if((direction > 0) &&
+                    (s_position_step_cell_count < POSITION_STEP_TEST_CELL_MAX))
+            {
+                s_position_step_cell_count++;
+            }
         }
-        else if(s_position_step_item == POSITION_STEP_TUNE_DEADZONE_MIN_RATIO)
+        else if(s_position_step_item == POSITION_STEP_TEST_ITEM_DISTANCE)
         {
-            MecanumSetSpeedDeadzoneMinRatio(position_step_test_adjust(
-                MecanumGetSpeedDeadzoneMinRatio(),
-                POSITION_STEP_TUNE_DEADZONE_RATIO_STEP,
-                POSITION_STEP_TUNE_DEADZONE_RATIO_MIN,
-                POSITION_STEP_TUNE_DEADZONE_RATIO_MAX,
-                direction));
+            s_position_step_cell_distance =
+                position_step_test_adjust_distance(
+                    s_position_step_cell_distance, direction);
         }
-        else if((s_position_step_item == POSITION_STEP_TUNE_RUN) &&
+        else if(s_position_step_item == POSITION_STEP_TEST_ITEM_TOLERANCE)
+        {
+            s_position_step_tolerance =
+                position_step_test_adjust_tolerance(
+                    s_position_step_tolerance, direction);
+        }
+        else if((s_position_step_item == POSITION_STEP_TEST_ITEM_RUN) &&
                 (direction > 0))
         {
-            position_step_test_reset_control();
             start_requested = 1u;
         }
-        __enable_irq();
 
-        if(start_requested != 0u)
+        if(start_requested == 0u)
         {
-            path_executor_start_body_step_with_distance(
-                s_position_step_directions[s_position_step_direction_index],
-                s_position_step_distance);
+            s_position_step_aborted = 0u;
+            position_step_test_clear_measurement();
         }
-        key_clear_all_state();
+        __enable_irq();
+    }
+
+    key_clear_all_state();
+    if(start_requested != 0u)
+    {
+        position_step_test_start();
     }
 }
 
 void position_step_test_update_10ms(void)
 {
     path_executor_update_10ms();
+    position_step_test_diag_update();
 
-    if(path_executor_is_idle() == 0u)
+    if(path_executor_is_fault() != 0u)
+    {
+        s_position_step_diag_active = 0u;
+        MecanumCarStop();
+    }
+    else if(path_executor_is_idle() == 0u)
     {
         MecanumCarSpeedControl();
+        MecanumMotorSpeedControl();
     }
     else
     {
-        position_step_test_reset_control();
+        s_position_step_diag_active = 0u;
+        MecanumCarStop();
     }
-
-    MecanumMotorSpeedControl();
 }
 
 void position_step_test_screen_init(void)
 {
     ips200_clear();
-    ips200_show_string(0,   0, "CELL DISTANCE TEST");
+    ips200_show_string(0,   0, "GRID DISTANCE TUNE");
     ips200_show_string(0,  16, "ITEM");
-    ips200_show_string(0,  32, "STATE");
-    ips200_show_string(0,  48, "DIR");
-    ips200_show_string(0,  64, "CELL TARGET");
-    ips200_show_string(0,  80, "ENC DIST");
-    ips200_show_string(0,  96, "DIST ERR");
-    ips200_show_string(0, 112, "ENC X");
-    ips200_show_string(0, 128, "ENC Y");
-    ips200_show_string(0, 144, "TARGET X/Y");
-    ips200_show_string(0, 160, "CMD VX/VY");
-    ips200_show_string(0, 176, "YAW");
-    ips200_show_string(0, 192, "LAT FF MIN");
+    ips200_show_string(112,16, "STATE");
+    ips200_show_string(0,  32, "DIR");
+    ips200_show_string(112,32, "FF");
+    ips200_show_string(0,  48, "CELLS");
+    ips200_show_string(112,48, "DIST");
+    ips200_show_string(0,  64, "TOTAL/TOL");
+    ips200_show_string(0,  80, "POS X/Y");
+    ips200_show_string(0,  96, "TGT X/Y");
+    ips200_show_string(0, 112, "ERR X/Y");
+    ips200_show_string(0, 128, "CARRY X/Y");
+    ips200_show_string(0, 144, "CMD X/Y");
+    ips200_show_string(0, 160, "ENC FL/FR");
+    ips200_show_string(0, 176, "ENC BL/BR");
+    ips200_show_string(0, 192, "YAW D/PK");
     ips200_show_string(0, 208, "K2:ITEM K3:-");
     ips200_show_string(0, 224, "K4:+/RUN ANY:STOP");
 }
 
 void position_step_test_screen_update(void)
 {
-    position_step_tune_item_t item;
-    uint8 direction_index;
+    position_step_test_item_t item;
     uint8 state;
+    uint8 aborted;
+    path_executor_fault_reason_t fault_reason;
+    uint8 direction_index;
+    uint8 cell_count;
     float cell_distance;
-    float encoder_distance;
+    float complete_tolerance;
+    float total_target;
+    float total_x;
+    float total_y;
     float target_x;
     float target_y;
     float position_x;
     float position_y;
+    float carry_x;
+    float carry_y;
     float command_vx;
     float command_vy;
-    float yaw_value;
+    float wheel_fl;
+    float wheel_fr;
+    float wheel_bl;
+    float wheel_br;
+    float yaw_delta;
+    float yaw_peak;
     float deadzone_min_ratio;
 
     if(++s_position_step_screen_tick < 10u)
@@ -585,63 +1071,121 @@ void position_step_test_screen_update(void)
 
     __disable_irq();
     item = s_position_step_item;
-    direction_index = s_position_step_direction_index;
     state = path_executor_get_state();
-    cell_distance = s_position_step_distance;
-    encoder_distance = path_executor_get_last_step_distance();
+    aborted = s_position_step_aborted;
+    fault_reason = path_executor_get_fault_reason();
+    direction_index = s_position_step_direction_index;
+    cell_count = s_position_step_cell_count;
+    cell_distance = s_position_step_cell_distance;
+    complete_tolerance = s_position_step_tolerance;
+    total_x = s_position_step_total_x;
+    total_y = s_position_step_total_y;
     target_x = path_executor_get_target_x();
     target_y = path_executor_get_target_y();
     position_x = path_executor_get_position_x();
     position_y = path_executor_get_position_y();
+    carry_x = path_executor_get_carry_x();
+    carry_y = path_executor_get_carry_y();
     command_vx = target_vx;
     command_vy = target_vy;
-    yaw_value = yaw;
+    wheel_fl = (float)encoder_fl;
+    wheel_fr = (float)encoder_fr;
+    wheel_bl = (float)encoder_bl;
+    wheel_br = (float)encoder_br;
+    yaw_delta = s_position_step_yaw_delta;
+    yaw_peak = s_position_step_yaw_peak;
     deadzone_min_ratio = MecanumGetSpeedDeadzoneMinRatio();
     __enable_irq();
 
+    total_target = (float)cell_count * cell_distance;
+
     switch(item)
     {
-        case POSITION_STEP_TUNE_DIRECTION: ips200_show_string(104, 16, "DIR "); break;
-        case POSITION_STEP_TUNE_DISTANCE:  ips200_show_string(104, 16, "DIST"); break;
-        case POSITION_STEP_TUNE_DEADZONE_MIN_RATIO:
-            ips200_show_string(104, 16, "FFMN"); break;
-        case POSITION_STEP_TUNE_RUN:       ips200_show_string(104, 16, "RUN "); break;
-        default:                           ips200_show_string(104, 16, "ERR "); break;
+        case POSITION_STEP_TEST_ITEM_DIRECTION:
+            ips200_show_string(40, 16, "DIR "); break;
+        case POSITION_STEP_TEST_ITEM_CELLS:
+            ips200_show_string(40, 16, "CELL"); break;
+        case POSITION_STEP_TEST_ITEM_DISTANCE:
+            ips200_show_string(40, 16, "DIST"); break;
+        case POSITION_STEP_TEST_ITEM_TOLERANCE:
+            ips200_show_string(40, 16, "TOL "); break;
+        case POSITION_STEP_TEST_ITEM_RUN:
+            ips200_show_string(40, 16, "RUN "); break;
+        default:
+            ips200_show_string(40, 16, "ERR "); break;
     }
 
-    switch(state)
+    if(aborted != 0u)
     {
-        case 0u: ips200_show_string(104, 32, "IDLE   "); break;
-        case 1u: ips200_show_string(104, 32, "LOAD   "); break;
-        case 2u: ips200_show_string(104, 32, "RUN    "); break;
-        case 3u: ips200_show_string(104, 32, "SETTLE "); break;
-        case 4u: ips200_show_string(104, 32, "DONE   "); break;
-        case 5u: ips200_show_string(104, 32, "FAULT  "); break;
-        default: ips200_show_string(104, 32, "INVALID"); break;
+        ips200_show_string(160, 16, "ABORT  ");
     }
-
-    switch(s_position_step_directions[direction_index])
+    else
     {
-        case SOKOBAN_BODY_FORWARD:  ips200_show_string(104, 48, "FORWARD "); break;
-        case SOKOBAN_BODY_BACKWARD: ips200_show_string(104, 48, "BACKWARD"); break;
-        case SOKOBAN_BODY_LEFT:     ips200_show_string(104, 48, "LEFT    "); break;
-        case SOKOBAN_BODY_RIGHT:    ips200_show_string(104, 48, "RIGHT   "); break;
-        default:                    ips200_show_string(104, 48, "INVALID "); break;
+        switch(state)
+        {
+            case 0u: ips200_show_string(160, 16, "IDLE   "); break;
+            case 1u: ips200_show_string(160, 16, "LOAD   "); break;
+            case 2u: ips200_show_string(160, 16, "RUN    "); break;
+            case 3u: ips200_show_string(160, 16, "SETTLE "); break;
+            case 4u: ips200_show_string(160, 16, "DONE   "); break;
+            case 5u:
+                switch(fault_reason)
+                {
+                    case PATH_EXECUTOR_FAULT_INVALID_MOVE:
+                        ips200_show_string(160, 16, "F_CMD  "); break;
+                    case PATH_EXECUTOR_FAULT_RUN_TIMEOUT:
+                        ips200_show_string(160, 16, "F_RUN  "); break;
+                    case PATH_EXECUTOR_FAULT_STOP_TIMEOUT:
+                        ips200_show_string(160, 16, "F_STOP "); break;
+                    case PATH_EXECUTOR_FAULT_YAW_TIMEOUT:
+                        ips200_show_string(160, 16, "F_YAW  "); break;
+                    default:
+                        ips200_show_string(160, 16, "FAULT  "); break;
+                }
+                break;
+            default: ips200_show_string(160, 16, "INVALID"); break;
+        }
     }
 
-    ips200_show_float(104,  64, cell_distance,                    7, 1);
-    ips200_show_float(104,  80, encoder_distance,                 7, 2);
-    ips200_show_float(104,  96, cell_distance-encoder_distance,  7, 2);
-    ips200_show_float(104, 112, position_x,                       7, 2);
-    ips200_show_float(104, 128, position_y,                       7, 2);
-    ips200_show_float(64,  144, target_x,                         6, 1);
-    ips200_show_string(120, 144, "/");
-    ips200_show_float(136, 144, target_y,                         6, 1);
-    ips200_show_float(64,  160, command_vx,                       6, 1);
-    ips200_show_string(120, 160, "/");
-    ips200_show_float(136, 160, command_vy,                       6, 1);
-    ips200_show_float(104, 176, yaw_value,                        7, 1);
-    ips200_show_float(104, 192, deadzone_min_ratio,               7, 2);
+    switch(direction_index)
+    {
+        case 0u: ips200_show_string(32, 32, "FORWARD "); break;
+        case 1u: ips200_show_string(32, 32, "BACKWARD"); break;
+        case 2u: ips200_show_string(32, 32, "LEFT    "); break;
+        case 3u: ips200_show_string(32, 32, "RIGHT   "); break;
+        default: ips200_show_string(32, 32, "INVALID "); break;
+    }
+
+    ips200_show_float(144, 32, deadzone_min_ratio, 5, 2);
+    ips200_show_uint(48, 48, cell_count, 2);
+    ips200_show_float(152, 48, cell_distance,       5, 1);
+    ips200_show_float(72,  64, total_target,        6, 1);
+    ips200_show_string(128, 64, "/");
+    ips200_show_float(144, 64, complete_tolerance,  5, 1);
+    ips200_show_float(64,  80, total_x,             6, 2);
+    ips200_show_string(120, 80, "/");
+    ips200_show_float(136, 80, total_y,             6, 2);
+    ips200_show_float(64,  96, target_x,            6, 2);
+    ips200_show_string(120, 96, "/");
+    ips200_show_float(136, 96, target_y,            6, 2);
+    ips200_show_float(64, 112, target_x-position_x, 6, 2);
+    ips200_show_string(120,112, "/");
+    ips200_show_float(136,112, target_y-position_y, 6, 2);
+    ips200_show_float(72, 128, carry_x,             6, 2);
+    ips200_show_string(128,128, "/");
+    ips200_show_float(144,128, carry_y,             6, 2);
+    ips200_show_float(64, 144, command_vx,          6, 1);
+    ips200_show_string(120,144, "/");
+    ips200_show_float(136,144, command_vy,          6, 1);
+    ips200_show_float(80, 160, wheel_fl,            5, 1);
+    ips200_show_string(128,160, "/");
+    ips200_show_float(144,160, wheel_fr,            5, 1);
+    ips200_show_float(80, 176, wheel_bl,            5, 1);
+    ips200_show_string(128,176, "/");
+    ips200_show_float(144,176, wheel_br,            5, 1);
+    ips200_show_float(72, 192, yaw_delta,           6, 1);
+    ips200_show_string(128,192, "/");
+    ips200_show_float(144,192, yaw_peak,            6, 1);
 }
 
 #define LABEL_TEST_OBJECT_TYPE       (1u)

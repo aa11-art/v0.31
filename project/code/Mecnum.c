@@ -31,17 +31,17 @@ float now_y=0.0f;
 void mecanum_pid_init(void)
 {
 	//角度环
-    PID_Init(&yaw_pid, 5.0f, 0.0f, 0.0f, 400.0f, 0.0f);
+    PID_Init(&yaw_pid, 4.5f, 0.0f, 0.0f, 400.0f, 0.0f);
 
 
     // PID_Init(&speed_pid[0],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[1],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[2],4, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[3],4, 0.2, 0, 4000,4000);
-    PID_Init(&speed_pid[0],8.0, 0.3, 0, 4000,4000);
-    PID_Init(&speed_pid[1],8.0, 0.3, 0, 4000,4000);
-    PID_Init(&speed_pid[2],8.0, 0.3, 0, 4000,4000);
-    PID_Init(&speed_pid[3],8.0, 0.3, 0, 4000,4000);
+    PID_Init(&speed_pid[0],7.5, 0.25, 0, 4000,4000);
+    PID_Init(&speed_pid[1],7.5, 0.2, 0, 4000,4000);
+    PID_Init(&speed_pid[2],8.0, 0.25, 0, 4000,4000);
+    PID_Init(&speed_pid[3],7.5, 0.2, 0, 4000,4000);
     // PID_Init(&speed_pid[0],5.5, 0.47, 0, 4000,4000);
     // PID_Init(&speed_pid[1],5.5, 0.47, 0, 4000,4000);
     // PID_Init(&speed_pid[2],5.5, 0.47, 0, 4000,4000);
@@ -52,11 +52,11 @@ void mecanum_pid_init(void)
     // PID_Init(&speed_pid[3],1,0,0,4000,4000);
 
     // 位置环
-    PID_Init(&pos_pid_x,7,0,0,55,0);
+    PID_Init(&pos_pid_x,6,0,0,55,0);
     PID_Init(&pos_pid_y,8.5,0,0,80,0);
     // PID_Init(&pos_pid_w,0.5,0,0,200,0);
     // // 角速度环
-    PID_Init(&gyro_w_pid, 1.5f, 0.0f, 0.0f, 500.0f, 0.0f);
+    PID_Init(&gyro_w_pid, 1.8f, 0.0f, 0.0f, 1000.0f, 0.0f);
 }
 //位置环控制函数
 // target_x/target_y: 期望沿各轴的目标位移（可为相对距离）
@@ -383,6 +383,17 @@ void MecanumSpeedPidReset(void)
     for(i = 0u; i < 4u; i++)
     {
         MecanumSpeedPidResetOne(i);
+    }
+}
+
+void MecanumSetWheelSpeedPidGains(uint8 index, float kp, float ki, float kd)
+{
+    if(index < 4u)
+    {
+        speed_pid[index].kp = kp;
+        speed_pid[index].ki = ki;
+        speed_pid[index].kd = kd;
+        MecanumSpeedPidResetOne(index);
     }
 }
 

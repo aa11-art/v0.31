@@ -3,10 +3,24 @@
 
 #include "sokoban_solver.h"
 
+typedef enum
+{
+    PATH_EXECUTOR_FAULT_NONE = 0,
+    PATH_EXECUTOR_FAULT_INVALID_MOVE,
+    PATH_EXECUTOR_FAULT_RUN_TIMEOUT,
+    PATH_EXECUTOR_FAULT_STOP_TIMEOUT,
+    PATH_EXECUTOR_FAULT_YAW_TIMEOUT
+} path_executor_fault_reason_t;
+
 void path_executor_init(void);
 void path_executor_abort(void);
+uint8_t path_executor_clear_carry_error(void);
 uint8_t path_executor_start(const sokoban_solution_t *solution);
 uint8_t path_executor_start_with_distance(const sokoban_solution_t *solution, float step_distance);
+uint8_t path_executor_start_with_distance_and_tolerance(
+    const sokoban_solution_t *solution,
+    float step_distance,
+    float complete_tolerance);
 uint8_t path_executor_start_body_step(sokoban_body_direction_t direction);
 uint8_t path_executor_start_body_step_with_distance(sokoban_body_direction_t direction,
                                                     float step_distance);
@@ -20,6 +34,7 @@ uint8_t path_executor_is_done(void);
 uint8_t path_executor_is_fault(void);
 uint8_t path_executor_is_running(void);
 uint8_t path_executor_get_state(void);
+path_executor_fault_reason_t path_executor_get_fault_reason(void);
 uint16_t path_executor_get_step_index(void);
 uint16_t path_executor_get_move_count(void);
 void path_executor_set_heading(sokoban_direction_t heading);
@@ -28,5 +43,7 @@ float path_executor_get_position_x(void);
 float path_executor_get_position_y(void);
 float path_executor_get_target_x(void);
 float path_executor_get_target_y(void);
+float path_executor_get_carry_x(void);
+float path_executor_get_carry_y(void);
 
 #endif

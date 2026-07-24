@@ -9,6 +9,16 @@
  */
 #define CAMERA_SOKOBAN_USE_FIXED_TEST_MAP   (0u)
 
+typedef struct
+{
+    uint8_t valid;
+    uint8_t confidence;
+    uint8_t frame_sequence;
+    uint16_t x100;
+    uint16_t y100;
+    uint32_t sequence;
+} camera_pose_snapshot_t;
+
 void camera_sokoban_init(void);
 void camera_sokoban_process(void);
 uint8_t camera_sokoban_take_last_solution(sokoban_solution_t *out);
@@ -21,5 +31,6 @@ uint8_t camera_sokoban_copy_latest_frame(
     uint8_t *player_col,
     uint8_t *map_all_zero,
     uint32_t *sequence);
+uint8_t camera_sokoban_copy_latest_pose(camera_pose_snapshot_t *pose);
 
 #endif

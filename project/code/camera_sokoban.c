@@ -659,3 +659,34 @@ uint8_t camera_sokoban_copy_latest_frame(
     *sequence = snapshot.sequence;
     return 1u;
 }
+
+uint8_t camera_sokoban_copy_latest_pose(camera_pose_snapshot_t *pose)
+{
+    uint32_t sequence_before;
+    uint32_t sequence_after;
+
+    if((pose == 0) || (camera_pose_sequence == 0u))
+    {
+        return 0u;
+    }
+
+    do
+    {
+        sequence_before = camera_pose_sequence;
+        if((sequence_before == 0u) || ((sequence_before & 1u) != 0u))
+        {
+            sequence_after = sequence_before + 1u;
+            continue;
+        }
+        pose->valid = camera_pose_valid;
+        pose->confidence = camera_pose_confidence;
+        pose->frame_sequence = camera_pose_frame_sequence;
+        pose->x100 = camera_pose_x100;
+        pose->y100 = camera_pose_y100;
+        sequence_after = camera_pose_sequence;
+    } while((sequence_before != sequence_after) ||
+            ((sequence_after & 1u) != 0u));
+
+    pose->sequence = sequence_after;
+    return 1u;
+}

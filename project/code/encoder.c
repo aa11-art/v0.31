@@ -9,9 +9,9 @@ int encoder_space=0;
 void encoder_get_speed(void)
 {
 	encoder_fl = encoder_get_count(ENCODER_4) * 2;
-	encoder_fr = -encoder_get_count(ENCODER_3) * 2;
+	encoder_fr = -encoder_get_count(ENCODER_3) * 2.03;
 	encoder_bl = -encoder_get_count(ENCODER_1);
-	encoder_br = -encoder_get_count(ENCODER_2);
+	encoder_br = encoder_get_count(ENCODER_2) * 1.03;
 	encoder_clear_count(ENCODER_1);
 	encoder_clear_count(ENCODER_2);
 	encoder_clear_count(ENCODER_3);
