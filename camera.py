@@ -24,11 +24,17 @@ STATE_PRIORITY = {
     STATE_CAR: 6,
     STATE_BOMB: 5,
 }
+STATE_NAMES = {
+    STATE_GOAL: "goal",
+    STATE_BOX: "box",
+    STATE_BOMB: "bomb",
+}
 DEBUG_DRAW_GRID = False
 DEBUG_PRINT_STATUS = False
 car_debug = True
 DEBUG_PRINT_EVERY_N_FRAMES = 10
 DEBUG_PRINT_GRID = False
+DEBUG_DRAW_CAR = True
 ENABLE_UART = True
 UART_ID = 12
 UART_BAUD = 115200
@@ -38,14 +44,26 @@ POSE_FLAG_VALID = 0x01
 POSE_INVALID_COORD = 0xFFFF
 POSE_HEAD = (0xA4, 0xB4)
 POSE_TAIL = 0xC4
-CAR_BODY_AMBIGUITY_RATIO = 0.90
-CAR_BODY_MIN_CELL_SIZE = 0.50
+CAR_PAIR_MIN_DISTANCE = 0.10
+CAR_PAIR_MAX_DISTANCE = 1.20
+CAR_PAIR_AMBIGUITY_RATIO = 0.90
+CAR_PAIR_MIN_CONFIDENCE = 60
+CAR_MARKER_MAX_CELL_SIZE = 0.90
+CAR_TRACK_MAX_JUMP_CELL = 1.50
+CAR_TRACK_LOST_FRAMES = 15
+CAR_BODY_MIN_CELL_SIZE = 0.20
 CAR_BODY_MAX_CELL_SIZE = 1.30
+CAR_FALLBACK_TRACK_MAX_JUMP_CELL = 0.75
+CAR_FALLBACK_START_CONFIRM_FRAMES = 3
+CAR_FALLBACK_TRACK_CONFIRM_FRAMES = 2
+CAR_FALLBACK_CONFIDENCE = 65
 FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
     "box": (0, 100, -53, 127, 127, 49),
     "goal": (100, 0, 80, 127, 127, -128),
+    "car_head": (0, 100, -12, -128, -128, -13),
+    "car_tail": (63, 40, -128, -38, 127, -128),
     "car_body": (0, 100, -44, -128, -128, 84),
     "road": (0, 100, -128, 80, -128, -57),
     "bomb": (0, 100, 26, 127, 127, -38),
@@ -58,6 +76,8 @@ BOX_PIXELS_THRESHOLD = 5
 BOX_AREA_THRESHOLD = 4
 CAR_PIXELS_THRESHOLD = 15
 CAR_AREA_THRESHOLD = 15
+CAR_MARKER_PIXELS_THRESHOLD = 3
+CAR_MARKER_AREA_THRESHOLD = 3
 BOMB_PIXELS_THRESHOLD = 10
 BOMB_AREA_THRESHOLD = 5
 def normalize_lab_threshold(threshold):
@@ -78,6 +98,12 @@ GRID_THRESHOLD_RULES = (
 GRID_THRESHOLDS = [rule[1] for rule in GRID_THRESHOLD_RULES]
 GRID_MIN_PIXELS_THRESHOLD = min([rule[2] for rule in GRID_THRESHOLD_RULES])
 GRID_MIN_AREA_THRESHOLD = min([rule[3] for rule in GRID_THRESHOLD_RULES])
+car_last_valid_pose = None
+car_frames_since_valid = 0
+car_fallback_pending_cell = None
+car_fallback_pending_count = 0
+car_debug_rectangles = []
+car_debug_lines = []
 def clamp(value, min_value, max_value):
     if value < min_value:
         return min_value
@@ -138,6 +164,21 @@ def create_grid(default_state):
     return [[default_state for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
 def inner_map_roi(map_roi):
     return map_roi
+def grid_cell_roi(map_roi, row, col):
+    rx, ry, rw, rh = map_roi
+    cell_w = rw / VISIBLE_COLS
+    cell_h = rh / VISIBLE_ROWS
+    inner_size = int(min(cell_w, cell_h) * INNER_SIZE_RATIO)
+    if inner_size < 2:
+        inner_size = 2
+    half = inner_size // 2
+    cx = int(rx + (col - 0.5) * cell_w)
+    cy = int(ry + (row - 0.5) * cell_h)
+    x0 = clamp(cx - half, 0, FRAME_W - 1)
+    y0 = clamp(cy - half, 0, FRAME_H - 1)
+    roi_w = clamp(inner_size, 1, FRAME_W - x0)
+    roi_h = clamp(inner_size, 1, FRAME_H - y0)
+    return (x0, y0, roi_w, roi_h)
 def draw_grid(img, map_roi):
     if not DEBUG_DRAW_GRID:
         return
@@ -173,22 +214,9 @@ def classify_grid_blobs(blobs):
     return state
 def build_grid(img, map_roi):
     grid = create_grid(STATE_WALL)
-    rx, ry, rw, rh = map_roi
-    cell_w = rw / VISIBLE_COLS
-    cell_h = rh / VISIBLE_ROWS
-    inner_size = int(min(cell_w, cell_h) * INNER_SIZE_RATIO)
-    if inner_size < 2:
-        inner_size = 2
-    half = inner_size // 2
     for row in range(1, GRID_ROWS - 1):
         for col in range(1, GRID_COLS - 1):
-            cx = int(rx + (col - 0.5) * cell_w)
-            cy = int(ry + (row - 0.5) * cell_h)
-            x0 = clamp(cx - half, 0, FRAME_W - 1)
-            y0 = clamp(cy - half, 0, FRAME_H - 1)
-            roi_w = clamp(inner_size, 1, FRAME_W - x0)
-            roi_h = clamp(inner_size, 1, FRAME_H - y0)
-            roi = (x0, y0, roi_w, roi_h)
+            roi = grid_cell_roi(map_roi, row, col)
             blobs = img.find_blobs(
                 GRID_THRESHOLDS,
                 roi=roi,
@@ -198,7 +226,205 @@ def build_grid(img, map_roi):
             )
             grid[row][col] = classify_grid_blobs(blobs)
     return grid
-def find_car_body_candidates(img, map_roi):
+def center_grid_in_map(center_grid):
+    return (center_grid is not None and
+            center_grid[0] >= 0.5 and center_grid[0] <= GRID_COLS - 1.5 and
+            center_grid[1] >= 0.5 and center_grid[1] <= GRID_ROWS - 1.5)
+def blob_grid_center(blob, homography):
+    return pixel_to_grid(blob.x() + blob.w() * 0.5,
+                         blob.y() + blob.h() * 0.5,
+                         homography)
+def print_car_blob(name, index, blob, center_grid, cell_w, cell_h, result):
+    if center_grid is None:
+        grid_text = "none"
+    else:
+        grid_text = "(%.2f,%.2f)" % (center_grid[0], center_grid[1])
+    print("%s[%d] rect=%s ratio=(%.2f,%.2f) pixels=%d area=%d grid=%s result=%s" %
+          (name, index, str(blob.rect()), blob.w() / cell_w, blob.h() / cell_h,
+           blob.pixels(), blob.area(), grid_text, result))
+def reset_car_debug_overlay():
+    global car_debug_rectangles
+    global car_debug_lines
+    car_debug_rectangles = []
+    car_debug_lines = []
+def draw_car_debug_overlay(img):
+    if not DEBUG_DRAW_CAR:
+        return
+    for rect, color in car_debug_rectangles:
+        img.draw_rectangle(rect, color=color)
+    for line, color in car_debug_lines:
+        img.draw_line(line, color=color)
+def draw_blob(img, blob, color):
+    if DEBUG_DRAW_CAR:
+        car_debug_rectangles.append((blob.rect(), color))
+def blobs_overlap_too_much(left, right):
+    x0 = max(left.x(), right.x())
+    y0 = max(left.y(), right.y())
+    x1 = min(left.x() + left.w(), right.x() + right.w())
+    y1 = min(left.y() + left.h(), right.y() + right.h())
+    if x1 <= x0 or y1 <= y0:
+        return False
+    overlap = (x1 - x0) * (y1 - y0)
+    smaller = min(left.w() * left.h(), right.w() * right.h())
+    return overlap * 2 > smaller
+def find_marker_candidates(img, threshold, name, color, map_roi,
+                           homography, debug):
+    candidates = []
+    cell_w = map_roi[2] / VISIBLE_COLS
+    cell_h = map_roi[3] / VISIBLE_ROWS
+    max_w = cell_w * CAR_MARKER_MAX_CELL_SIZE
+    max_h = cell_h * CAR_MARKER_MAX_CELL_SIZE
+    blobs = img.find_blobs(
+        [threshold],
+        roi=inner_map_roi(map_roi),
+        pixels_threshold=1,
+        area_threshold=1,
+        merge=False,
+    )
+    for index in range(len(blobs)):
+        blob = blobs[index]
+        center_grid = blob_grid_center(blob, homography)
+        if blob.pixels() < CAR_MARKER_PIXELS_THRESHOLD:
+            result = "pixels_insufficient"
+        elif blob.area() < CAR_MARKER_AREA_THRESHOLD:
+            result = "area_insufficient"
+        elif blob.w() > max_w or blob.h() > max_h:
+            result = "too_large"
+        elif not center_grid_in_map(center_grid):
+            result = "out_of_map"
+        else:
+            result = "accepted"
+            candidates.append((blob, center_grid))
+        if debug:
+            print_car_blob(name, index, blob, center_grid,
+                           cell_w, cell_h, result)
+            draw_blob(img, blob, color)
+    if debug and len(blobs) == 0:
+        print("%s blobs=0 result=no_blob" % name)
+    return candidates
+def pair_continuity_distance_sq(center_x, center_y):
+    if car_last_valid_pose is None:
+        return 0.0
+    dx = center_x - car_last_valid_pose[0]
+    dy = center_y - car_last_valid_pose[1]
+    return dx * dx + dy * dy
+def draw_pair(img, head, tail):
+    if not DEBUG_DRAW_CAR:
+        return
+    head_x = int(head.x() + head.w() * 0.5)
+    head_y = int(head.y() + head.h() * 0.5)
+    tail_x = int(tail.x() + tail.w() * 0.5)
+    tail_y = int(tail.y() + tail.h() * 0.5)
+    center_x = (head_x + tail_x) // 2
+    center_y = (head_y + tail_y) // 2
+    car_debug_lines.append(
+        ((head_x, head_y, tail_x, tail_y), (255, 255, 255)))
+    car_debug_rectangles.append(
+        ((clamp(center_x - 2, 0, FRAME_W - 1),
+          clamp(center_y - 2, 0, FRAME_H - 1), 5, 5),
+         (255, 255, 255)))
+def find_car_pair(img, map_roi, homography, debug):
+    head_candidates = find_marker_candidates(
+        img, THRESHOLDS["car_head"], "head", (255, 0, 0),
+        map_roi, homography, debug)
+    tail_candidates = find_marker_candidates(
+        img, THRESHOLDS["car_tail"], "tail", (0, 0, 255),
+        map_roi, homography, debug)
+    min_distance_sq = CAR_PAIR_MIN_DISTANCE * CAR_PAIR_MIN_DISTANCE
+    max_distance_sq = CAR_PAIR_MAX_DISTANCE * CAR_PAIR_MAX_DISTANCE
+    max_jump_sq = CAR_TRACK_MAX_JUMP_CELL * CAR_TRACK_MAX_JUMP_CELL
+    best = None
+    best_score = -1.0
+    second_score = -1.0
+    pair_index = 0
+    for head, head_grid in head_candidates:
+        for tail, tail_grid in tail_candidates:
+            dx = head_grid[0] - tail_grid[0]
+            dy = head_grid[1] - tail_grid[1]
+            distance_sq = dx * dx + dy * dy
+            center_x = (head_grid[0] + tail_grid[0]) * 0.5
+            center_y = (head_grid[1] + tail_grid[1]) * 0.5
+            continuity_sq = pair_continuity_distance_sq(center_x, center_y)
+            reason = "accepted"
+            if blobs_overlap_too_much(head, tail):
+                reason = "overlap"
+            elif distance_sq < min_distance_sq:
+                reason = "pair_too_close"
+            elif distance_sq > max_distance_sq:
+                reason = "pair_too_far"
+            elif not center_grid_in_map((center_x, center_y)):
+                reason = "out_of_map"
+            elif (car_last_valid_pose is not None and
+                  car_frames_since_valid <= CAR_TRACK_LOST_FRAMES and
+                  continuity_sq > max_jump_sq):
+                reason = "track_jump"
+            if reason == "accepted":
+                support = head.pixels() + tail.pixels()
+                score = support / (1.0 + continuity_sq)
+                if score > best_score:
+                    second_score = best_score
+                    best_score = score
+                    best = (center_x, center_y, head, tail, support)
+                elif score > second_score:
+                    second_score = score
+            if debug:
+                print("pair[%d] center=(%.2f,%.2f) distance=%.2f continuity=%.2f result=%s" %
+                      (pair_index, center_x, center_y, distance_sq ** 0.5,
+                       continuity_sq ** 0.5, reason))
+            pair_index += 1
+    if best is None:
+        if debug:
+            print("pair accepted=0 result=no_valid_pair")
+        return None
+    if (second_score >= 0.0 and
+        second_score >= best_score * CAR_PAIR_AMBIGUITY_RATIO):
+        if debug:
+            print("pair result=ambiguous best=%.2f second=%.2f" %
+                  (best_score, second_score))
+        return None
+    if second_score < 0.0:
+        confidence = 100
+    else:
+        score_ratio = second_score / best_score
+        confidence = clamp(
+            int(100.0 - 40.0 * score_ratio / CAR_PAIR_AMBIGUITY_RATIO),
+            CAR_PAIR_MIN_CONFIDENCE, 100)
+    if debug:
+        print("pair pose=(%.2f,%.2f) support=%d confidence=%d" %
+              (best[0], best[1], best[4], confidence))
+        draw_pair(img, best[2], best[3])
+    return (best[0], best[1], confidence, "pair", best[2], best[3])
+def candidate_object_state(img, center_grid, map_roi):
+    col = int(center_grid[0] + 0.5)
+    row = int(center_grid[1] + 0.5)
+    if (row <= 0 or row >= GRID_ROWS - 1 or
+        col <= 0 or col >= GRID_COLS - 1):
+        return None
+    blobs = img.find_blobs(
+        GRID_THRESHOLDS,
+        roi=grid_cell_roi(map_roi, row, col),
+        pixels_threshold=GRID_MIN_PIXELS_THRESHOLD,
+        area_threshold=GRID_MIN_AREA_THRESHOLD,
+        merge=False,
+    )
+    return classify_grid_blobs(blobs)
+def classify_car_body_blob(img, blob, center_grid, map_roi,
+                           min_w, min_h, max_w, max_h):
+    if blob.pixels() < CAR_PIXELS_THRESHOLD:
+        return "pixels_insufficient"
+    if blob.area() < CAR_AREA_THRESHOLD:
+        return "area_insufficient"
+    if blob.w() < min_w or blob.h() < min_h:
+        return "too_small"
+    if blob.w() > max_w or blob.h() > max_h:
+        return "too_large"
+    if not center_grid_in_map(center_grid):
+        return "out_of_map"
+    object_state = candidate_object_state(img, center_grid, map_roi)
+    if object_state in (STATE_BOX, STATE_GOAL, STATE_BOMB):
+        return "object_%s" % STATE_NAMES[object_state]
+    return "accepted"
+def find_car_body_candidates(img, map_roi, homography, debug):
     candidates = []
     cell_w = map_roi[2] / VISIBLE_COLS
     cell_h = map_roi[3] / VISIBLE_ROWS
@@ -206,7 +432,7 @@ def find_car_body_candidates(img, map_roi):
     min_h = cell_h * CAR_BODY_MIN_CELL_SIZE
     max_w = cell_w * CAR_BODY_MAX_CELL_SIZE
     max_h = cell_h * CAR_BODY_MAX_CELL_SIZE
-    blobs = img.find_blobs(
+    selection_blobs = img.find_blobs(
         [THRESHOLDS["car_body"]],
         roi=inner_map_roi(map_roi),
         pixels_threshold=CAR_PIXELS_THRESHOLD,
@@ -214,55 +440,113 @@ def find_car_body_candidates(img, map_roi):
         merge=True,
         margin=0,
     )
-    for blob in blobs:
-        if (blob.w() >= min_w and blob.w() <= max_w and
-            blob.h() >= min_h and blob.h() <= max_h):
-            candidates.append(blob)
-    return (blobs, candidates)
-def find_car_pose(img, map_roi, homography, debug=False):
-    blobs, candidates = find_car_body_candidates(img, map_roi)
-    best = None
-    best_score = -1
-    second_score = -1
-    for blob in candidates:
-        score = blob.pixels()
-        if score > best_score:
-            second_score = best_score
-            best_score = score
-            best = blob
-        elif score > second_score:
-            second_score = score
-    if best is None:
-        if debug:
-            reason = "no_blob" if len(blobs) == 0 else "size_rejected"
-            print("car blobs=%d accepted=%d best_pixels=0 second_pixels=0 reason=%s" %
-                  (len(blobs), len(candidates), reason))
-        return None
-    if second_score >= 0 and second_score >= best_score * CAR_BODY_AMBIGUITY_RATIO:
-        if debug:
-            print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d reason=ambiguous" %
-                  (len(blobs), len(candidates), best_score, second_score))
-        return None
-    center_px = best.x() + best.w() * 0.5
-    center_py = best.y() + best.h() * 0.5
-    center_grid = pixel_to_grid(center_px, center_py, homography)
-    if (center_grid is None or
-        center_grid[0] < 0.5 or center_grid[0] > GRID_COLS - 1.5 or
-        center_grid[1] < 0.5 or center_grid[1] > GRID_ROWS - 1.5):
-        if debug:
-            print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d reason=out_of_map" %
-                  (len(blobs), len(candidates), best_score, second_score))
-        return None
-    if second_score < 0:
-        confidence = 100
-    else:
-        confidence = clamp(int(100 * (best_score - second_score) / best_score), 0, 100)
+    for blob in selection_blobs:
+        center_grid = blob_grid_center(blob, homography)
+        result = classify_car_body_blob(
+            img, blob, center_grid, map_roi, min_w, min_h, max_w, max_h)
+        if result == "accepted":
+            candidates.append((blob, center_grid))
     if debug:
-        print("car blobs=%d accepted=%d best_pixels=%d second_pixels=%d" %
-              (len(blobs), len(candidates), best_score, second_score))
-        print("car pose=(%.2f,%.2f) confidence=%d" %
-              (center_grid[0], center_grid[1], confidence))
-    return (center_grid[0], center_grid[1], confidence, best)
+        diagnostic_blobs = img.find_blobs(
+            [THRESHOLDS["car_body"]],
+            roi=inner_map_roi(map_roi),
+            pixels_threshold=1,
+            area_threshold=1,
+            merge=True,
+            margin=0,
+        )
+        for index in range(len(diagnostic_blobs)):
+            blob = diagnostic_blobs[index]
+            center_grid = blob_grid_center(blob, homography)
+            result = classify_car_body_blob(
+                img, blob, center_grid, map_roi,
+                min_w, min_h, max_w, max_h)
+            print_car_blob("body", index, blob, center_grid,
+                           cell_w, cell_h, result)
+            draw_blob(img, blob, (255, 255, 0))
+        if len(diagnostic_blobs) == 0:
+            print("body blobs=0 result=no_blob")
+    return candidates
+def fallback_candidate_near_last(candidates):
+    if car_last_valid_pose is None:
+        return candidates
+    max_jump_sq = (CAR_FALLBACK_TRACK_MAX_JUMP_CELL *
+                   CAR_FALLBACK_TRACK_MAX_JUMP_CELL)
+    near = []
+    for candidate in candidates:
+        center_grid = candidate[1]
+        dx = center_grid[0] - car_last_valid_pose[0]
+        dy = center_grid[1] - car_last_valid_pose[1]
+        if dx * dx + dy * dy <= max_jump_sq:
+            near.append(candidate)
+    return near
+def find_car_body_fallback(img, map_roi, homography, debug):
+    global car_last_valid_pose
+    global car_frames_since_valid
+    global car_fallback_pending_cell
+    global car_fallback_pending_count
+    candidates = find_car_body_candidates(
+        img, map_roi, homography, debug)
+    tracked_candidates = fallback_candidate_near_last(candidates)
+    if len(tracked_candidates) != 1:
+        car_fallback_pending_cell = None
+        car_fallback_pending_count = 0
+        if debug:
+            reason = "no_candidate" if len(tracked_candidates) == 0 else "ambiguous"
+            print("fallback candidates=%d result=%s" %
+                  (len(tracked_candidates), reason))
+        return None
+    blob, center_grid = tracked_candidates[0]
+    cell = (int(center_grid[1] + 0.5), int(center_grid[0] + 0.5))
+    if cell == car_fallback_pending_cell:
+        car_fallback_pending_count += 1
+    else:
+        car_fallback_pending_cell = cell
+        car_fallback_pending_count = 1
+    if car_last_valid_pose is None:
+        confirm_frames = CAR_FALLBACK_START_CONFIRM_FRAMES
+    else:
+        confirm_frames = CAR_FALLBACK_TRACK_CONFIRM_FRAMES
+    if car_fallback_pending_count < confirm_frames:
+        if debug:
+            print("fallback cell=%s stable=%d/%d result=waiting" %
+                  (str(cell), car_fallback_pending_count, confirm_frames))
+        return None
+    car_last_valid_pose = (center_grid[0], center_grid[1])
+    car_frames_since_valid = 0
+    car_fallback_pending_cell = cell
+    car_fallback_pending_count = CAR_FALLBACK_TRACK_CONFIRM_FRAMES
+    if debug:
+        print("fallback pose=(%.2f,%.2f) confidence=%d result=accepted" %
+              (center_grid[0], center_grid[1], CAR_FALLBACK_CONFIDENCE))
+        draw_blob(img, blob, (255, 255, 255))
+    return (center_grid[0], center_grid[1], CAR_FALLBACK_CONFIDENCE,
+            "body_fallback", blob, None)
+def find_car_pose(img, map_roi, homography, debug=False):
+    global car_last_valid_pose
+    global car_frames_since_valid
+    global car_fallback_pending_cell
+    global car_fallback_pending_count
+    reset_car_debug_overlay()
+    car_frames_since_valid += 1
+    if (car_last_valid_pose is not None and
+        car_frames_since_valid > CAR_TRACK_LOST_FRAMES):
+        if debug:
+            print("car track result=unlocked lost_frames=%d" %
+                  car_frames_since_valid)
+        car_last_valid_pose = None
+        car_fallback_pending_cell = None
+        car_fallback_pending_count = 0
+    pair_pose = find_car_pair(img, map_roi, homography, debug)
+    if pair_pose is not None:
+        car_last_valid_pose = (pair_pose[0], pair_pose[1])
+        car_frames_since_valid = 0
+        car_fallback_pending_cell = None
+        car_fallback_pending_count = 0
+        if debug:
+            find_car_body_candidates(img, map_roi, homography, True)
+        return pair_pose
+    return find_car_body_fallback(img, map_roi, homography, debug)
 def car_cell_from_pose(car_pose):
     if car_pose is None:
         return None
@@ -385,3 +669,4 @@ while True:
             print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
     img.draw_rectangle(active_map_roi, color=(0,255,0))
     draw_grid(img, MAP_ROI)
+    draw_car_debug_overlay(img)
