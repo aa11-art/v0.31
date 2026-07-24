@@ -7,12 +7,8 @@ VISIBLE_COLS = GRID_COLS - 2
 VISIBLE_ROWS = GRID_ROWS - 2
 FRAME_W = 320
 FRAME_H = 240
-# ROI contains only the visible 14 x 10 playable area. The outer wall ring is
-# synthesized in the grid and is not present in the image.
-MAP_ROI = (49, 54, 213, 148)
-# Visible-area boundary corners in TL, TR, BR, BL order. Replace these
-# defaults with measured image coordinates after the camera mount is fixed.
-MAP_CORNERS = ((49, 54), (262, 54), (262, 202), (49, 202))
+MAP_ROI = (47, 50, 210, 148)
+MAP_CORNERS = ((47, 50), (257, 50), (257, 195), (47, 195))
 INNER_SIZE_RATIO = 0.61
 STATE_ROAD = 0
 STATE_WALL = 1
@@ -44,7 +40,7 @@ POSE_HEAD = (0xA4, 0xB4)
 POSE_TAIL = 0xC4
 CAR_BODY_AMBIGUITY_RATIO = 0.90
 CAR_BODY_MIN_CELL_SIZE = 0.50
-CAR_BODY_MAX_CELL_SIZE = 1.20
+CAR_BODY_MAX_CELL_SIZE = 1.30
 FIXED_EXPOSURE_US = 200
 CAMERA_BRIGHTNESS = -2
 RAW_THRESHOLDS = {
@@ -387,5 +383,5 @@ while True:
             for row in grid:
                 print(row)
             print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-    img.draw_rectangle(active_map_roi, color=(0,0,0))
+    img.draw_rectangle(active_map_roi, color=(0,255,0))
     draw_grid(img, MAP_ROI)
